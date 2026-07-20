@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Работы</h1>
+<div class="actions">
+    <a class="btn secondary" href="/export/excel">Экспорт Excel</a>
+    <a class="btn secondary" href="/export/csv">Экспорт CSV</a>
+</div>
+<table>
+    <tr>
+        <th>#</th><th>Буксир</th><th>Объект</th><th>Вид работ</th><th>Агент</th>
+        <th>Начало</th><th>Окончание</th><th>GRT</th>
+        <th>Сумма</th><th>Валюта</th><th>Курс</th><th>Выручка, руб</th>
+        <th>Примечания</th><th>Статус</th><th></th>
+    </tr>
+    {% for w in items %}
+    <tr>
+        <td>{{ w.id }}</td>
+        <td>{{ w.tug.name if w.tug else "—" }}</td>
+        <td>{{ w.object_name or "—" }}</td>
+        <td>{{ w.work_type or "—" }}</td>
+        <td>{{ w.agent or "—" }}</td>
+        <td>{{ w.started_dt.strftime("%d.%m %H:%M") if w.started_dt else "—" }}</td>
+        <td>{{ w.finished_dt.strftime("%d.%m %H:%M") if w.finished_dt else "—" }}</td>
+        <td>{{ w.gross_tonnage or "—" }}</td>
+        <td>{{ "%.2f"|format(w.amount) if w.amount is not none else "—" }}</td>
+        <td>{{ w.currency or "—" }}</td>
+        <td>{{ w.cbr_rate if w.cbr_rate is not none else "—" }}</td>
+        <td>{{ "%.2f"|format(w.revenue_rub) if w.revenue_rub is not none else "—" }}</td>
+        <td class="muted">{{ w.calc_note or "" }}</td>
+        <td><span class="status">{{ w.status.value }}</span></td>
+        <td>
+            <form action="/works/{{ w.id }}/calculate" method="post" style="display:inline">
+                <button class="btn" type="submit">Рассчитать</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}

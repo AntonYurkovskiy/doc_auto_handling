@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Ваучеры</h1>
+<div class="actions"><a class="btn" href="/vouchers/new">+ Добавить вручную</a></div>
+<table>
+    <tr>
+        <th>#</th><th>№</th><th>Буксир</th><th>Судно</th><th>Вид работ</th>
+        <th>Начало</th><th>Окончание</th><th>Статус</th><th></th>
+    </tr>
+    {% for v in items %}
+    <tr>
+        <td>{{ v.id }}</td>
+        <td>{{ v.number or "—" }}</td>
+        <td>{{ v.tug.name if v.tug else "—" }}</td>
+        <td>{{ v.vessel_name or "—" }}</td>
+        <td>{{ v.work_type or "—" }}</td>
+        <td>{{ v.started_dt.strftime("%d.%m.%Y %H:%M") if v.started_dt else "—" }}</td>
+        <td>{{ v.finished_dt.strftime("%d.%m.%Y %H:%M") if v.finished_dt else "—" }}</td>
+        <td><span class="status">{{ v.status.value }}</span></td>
+        <td><a href="/vouchers/{{ v.id }}">Открыть</a></td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}

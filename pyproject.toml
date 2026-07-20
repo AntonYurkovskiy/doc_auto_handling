@@ -1,0 +1,23 @@
+[project]
+name = "doc_auto_handling"
+version = "0.1.0"
+description = "Автоматизация обработки заявок и ваучеров буксира: приём -> распознавание -> сопоставление -> расчёт -> БД"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["B008"]  # FastAPI Depends() в аргументах по умолчанию
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = false
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
