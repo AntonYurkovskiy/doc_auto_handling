@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% macro dtval(v) %}{{ v.strftime("%Y-%m-%dT%H:%M") if v else "" }}{% endmacro %}
+{% block content %}
+<h1>{{ "Ваучер #" ~ item.id if item else "Новый ваучер" }}</h1>
+<form class="grid" action="/vouchers" method="post">
+    {% if item %}<input type="hidden" name="voucher_id" value="{{ item.id }}">{% endif %}
+
+    <label>№ ваучера</label>
+    <input name="number" value="{{ item.number or '' if item else '' }}">
+
+    <label>Буксир</label>
+    <select name="tug_id">
+        <option value="">—</option>
+        {% for t in tugs %}
+        <option value="{{ t.id }}" {% if item and item.tug_id == t.id %}selected{% endif %}>{{ t.name }}</option>
+        {% endfor %}
+    </select>
+
+    <label>Название судна / объект</label>
+    <input name="vessel_name" value="{{ item.vessel_name or '' if item else '' }}">
+
+    <label>Агент</label>
+    <select name="agent">
+        <option value="">—</option>
+        {% for ag in agents %}
+        <option value="{{ ag.name }}" {% if item and item.agent == ag.name %}selected{% endif %}>{{ ag.name }}</option>
+        {% endfor %}
+    </select>
+
+    <label>Вид работ</label>
+    <input name="work_type" value="{{ item.work_type or '' if item else '' }}"
+           placeholder="Швартовка / Отшвартовка / Обслуживание морских сооружений ...">
+
+    <label>Выход из базы</label>
+    <input type="datetime-local" name="left_base_dt" value="{{ dtval(item.left_base_dt) if item else '' }}">
+
+    <label>Приход в базу</label>
+    <input type="datetime-local" name="arrived_base_dt" value="{{ dtval(item.arrived_base_dt) if item else '' }}">
+
+    <label>Начало работ</label>
+    <input type="datetime-local" name="started_dt" value="{{ dtval(item.started_dt) if item else '' }}">
+
+    <label>Окончание работ</label>
+    <input type="datetime-local" name="finished_dt" value="{{ dtval(item.finished_dt) if item else '' }}">
+
+    <label>Совместно с</label>
+    <input name="joint_with" value="{{ item.joint_with or '' if item else '' }}">
+
+    <label>Примечания</label>
+    <textarea name="remarks" rows="2">{{ item.remarks or '' if item else '' }}</textarea>
+
+    <div class="full actions">
+        <button class="btn" type="submit">Сохранить</button>
+    </div>
+</form>
+
+{% if item and item.file_path %}
+<p class="muted">Файл скана: {{ item.file_path }}</p>
+{% endif %}
+{% endblock %}

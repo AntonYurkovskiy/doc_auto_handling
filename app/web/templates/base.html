@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Обработка заявок и ваучеров{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <nav>
+        <a href="/">Дашборд</a>
+        <a href="/applications">Заявки</a>
+        <a href="/vouchers">Ваучеры</a>
+        <a href="/works">Работы</a>
+        <a href="/export/excel">Экспорт Excel</a>
+        <a href="/export/csv">Экспорт CSV</a>
+    </nav>
+</header>
+<main>
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

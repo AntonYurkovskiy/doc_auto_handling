@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% macro dtval(v) %}{{ v.strftime("%Y-%m-%dT%H:%M") if v else "" }}{% endmacro %}
+{% block content %}
+<h1>{{ "Заявка #" ~ item.id if item else "Новая заявка" }}</h1>
+<form class="grid" action="/applications" method="post">
+    {% if item %}<input type="hidden" name="application_id" value="{{ item.id }}">{% endif %}
+
+    <label>Название судна</label>
+    <input name="vessel_name" value="{{ item.vessel_name or '' if item else '' }}">
+
+    <label>№ ИМО</label>
+    <input name="imo" value="{{ item.imo or '' if item else '' }}">
+
+    <label>Агент</label>
+    <select name="agent">
+        <option value="">—</option>
+        {% for ag in agents %}
+        <option value="{{ ag.name }}" {% if item and item.agent == ag.name %}selected{% endif %}>{{ ag.name }}</option>
+        {% endfor %}
+    </select>
+
+    <label>Направление</label>
+    <select name="direction">
+        {% for d in ["вход", "выход", "прочее"] %}
+        <option value="{{ d }}" {% if item and item.direction.value == d %}selected{% endif %}>{{ d }}</option>
+        {% endfor %}
+    </select>
+
+    <label>Брутто (GRT)</label>
+    <input name="gross_tonnage" value="{{ item.gross_tonnage or '' if item else '' }}">
+
+    <label>Дата/время входа</label>
+    <input type="datetime-local" name="entry_datetime" value="{{ dtval(item.entry_datetime) if item else '' }}">
+
+    <label>Дата/время выхода</label>
+    <input type="datetime-local" name="exit_datetime" value="{{ dtval(item.exit_datetime) if item else '' }}">
+
+    <label>Пункт назначения</label>
+    <input name="destination" value="{{ item.destination or '' if item else '' }}">
+
+    <div class="full actions">
+        <button class="btn" type="submit">Сохранить</button>
+        {% if item %}<a class="btn secondary" href="/applications/{{ item.id }}/match">Сопоставить с ваучером</a>{% endif %}
+    </div>
+</form>
+
+{% if item and item.file_path %}
+<p class="muted">Файл: {{ item.file_path }}</p>
+{% endif %}
+{% if item and item.raw_text %}
+<div class="card">
+    <h3>Распознанный текст</h3>
+    <pre style="white-space: pre-wrap; font-size: 13px;">{{ item.raw_text[:3000] }}</pre>
+</div>
+{% endif %}
+{% endblock %}

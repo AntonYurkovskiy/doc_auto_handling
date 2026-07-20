@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Заявки</h1>
+<div class="actions"><a class="btn" href="/applications/new">+ Добавить вручную</a></div>
+<table>
+    <tr>
+        <th>#</th><th>Судно</th><th>Направление</th><th>GRT</th>
+        <th>Вход</th><th>Выход</th><th>Статус</th><th></th>
+    </tr>
+    {% for a in items %}
+    <tr>
+        <td>{{ a.id }}</td>
+        <td>{{ a.vessel_name or "—" }}</td>
+        <td>{{ a.direction.value }}</td>
+        <td>{{ a.gross_tonnage or "—" }}</td>
+        <td>{{ a.entry_datetime.strftime("%d.%m.%Y %H:%M") if a.entry_datetime else "—" }}</td>
+        <td>{{ a.exit_datetime.strftime("%d.%m.%Y %H:%M") if a.exit_datetime else "—" }}</td>
+        <td><span class="status">{{ a.status.value }}</span></td>
+        <td>
+            <a href="/applications/{{ a.id }}">Открыть</a> ·
+            <a href="/applications/{{ a.id }}/match">Сопоставить</a>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}
