@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Сопоставление заявки #{{ application.id }}</h1>
+<div class="card">
+    <b>{{ application.vessel_name or "—" }}</b> · {{ application.direction.value }} ·
+    GRT {{ application.gross_tonnage or "—" }} ·
+    {{ (application.entry_datetime or application.exit_datetime).strftime("%d.%m.%Y %H:%M")
+        if (application.entry_datetime or application.exit_datetime) else "без даты" }}
+</div>
+
+<h3>Кандидаты-ваучеры</h3>
+{% if candidates %}
+<table>
+    <tr><th>Score</th><th>№</th><th>Буксир</th><th>Судно</th><th>Вид работ</th><th>Причины</th><th></th></tr>
+    {% for c in candidates %}
+    <tr>
+        <td>{{ "%.2f"|format(c.score) }}</td>
+        <td>{{ c.voucher.number or "—" }}</td>
+        <td>{{ c.voucher.tug.name if c.voucher.tug else "—" }}</td>
+        <td>{{ c.voucher.vessel_name or "—" }}</td>
+        <td>{{ c.voucher.work_type or "—" }}</td>
+        <td class="muted">{{ ", ".join(c.reasons) }}</td>
+        <td>
+            <form action="/match" method="post" style="display:inline">
+                <input type="hidden" name="application_id" value="{{ application.id }}">
+                <input type="hidden" name="voucher_id" value="{{ c.voucher.id }}">
+                <button class="btn" type="submit">Создать работу</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+<p class="muted">Одна заявка может быть сопоставлена с несколькими ваучерами (несколько буксиров).</p>
+{% else %}
+<p class="muted">Подходящих ваучеров не найдено. Добавьте ваучер вручную.</p>
+{% endif %}
+{% endblock %}

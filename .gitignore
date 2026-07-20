@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Локальные данные и файлы (не коммитим документы/секреты)
+data/*.db
+data/*.db-*
+data/incoming/**
+data/files/**
+!data/incoming/.gitkeep
+!data/files/.gitkeep
+
+.env

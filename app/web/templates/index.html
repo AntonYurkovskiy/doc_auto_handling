@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Обработка заявок и ваучеров буксира</h1>
+<div class="cards">
+    <div class="card"><div class="num">{{ n_applications }}</div>Заявки</div>
+    <div class="card"><div class="num">{{ n_vouchers }}</div>Ваучеры</div>
+    <div class="card"><div class="num">{{ n_works }}</div>Работы</div>
+</div>
+<div class="actions">
+    <a class="btn" href="/applications/new">+ Заявка вручную</a>
+    <a class="btn" href="/vouchers/new">+ Ваучер вручную</a>
+</div>
+<div class="card">
+    <h3>Загрузить заявку (email .eml / PDF)</h3>
+    <form action="/applications/upload" method="post" enctype="multipart/form-data">
+        <input type="file" name="file" required>
+        <button class="btn" type="submit">Загрузить и распознать</button>
+    </form>
+</div>
+<div class="card">
+    <h3>Загрузить ваучер (скан PDF)</h3>
+    <form action="/vouchers/upload" method="post" enctype="multipart/form-data">
+        <input type="file" name="file" required>
+        <button class="btn" type="submit">Загрузить</button>
+    </form>
+    <p class="muted">Поля ваучера вводятся вручную (рукописные даты/времена). Авто-распознавание — в следующих фазах.</p>
+</div>
+{% endblock %}
