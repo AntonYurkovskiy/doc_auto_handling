@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -52,6 +53,19 @@ def normalize_work_type(raw: str | None) -> str | None:
     return text
 
 
+def tug_count_from_joint(joint_with: str | None) -> int:
+    """Число буксиров, работавших совместно, из строки ваучера «совместно с …».
+
+    Пусто → 1 буксир (без деления). 1 упомянутый буксир → 2 (делим на 2),
+    2 буксира → 3 (делим на 3) и т.д. — так стоимость за тонну делится поровну.
+    """
+    if not joint_with or not joint_with.strip():
+        return 1
+    parts = re.split(r"[,;/]|\bи\b|\+", joint_with)
+    others = [p for p in (x.strip() for x in parts) if p]
+    return len(others) + 1
+
+
 def minutes_between(start: datetime | None, end: datetime | None) -> int:
     if start is None or end is None:
         return 0
@@ -78,6 +92,7 @@ def calculate(
     arrived_base_dt: datetime | None = None,
     is_ice: bool = False,
     escort_hours: float | None = None,
+    tug_count: int = 1,
     fx_provider: FxProvider = get_cbr_rate,
     dayoff_provider: DayOffProvider = is_day_off,
 ) -> CalcResult:
@@ -115,6 +130,7 @@ def calculate(
             work_minutes=work_minutes,
             work_hours=work_hours,
             is_ice=is_ice,
+            tug_count=tug_count,
         )
 
     # Доп. компонент «Сопровождение», если указаны часы сопровождения.
@@ -170,6 +186,7 @@ def _calc_by_rule(
     work_minutes: int,
     work_hours: float,
     is_ice: bool,
+    tug_count: int = 1,
 ) -> tuple[float, str, str]:
     agent_rates = RATES.get(agent)
     if agent_rates is None:
@@ -182,17 +199,18 @@ def _calc_by_rule(
     rate = float(rule["rate"])
     if is_ice and rule.get("rate_ice"):
         rate = float(rule["rate_ice"])
-    divisor = rule.get("divisor", 1) or 1
     ice_label = " (лёд)" if is_ice else ""
 
     if rule["unit"] == "per_ton":
         if gross_tonnage is None:
             raise ValueError("Для тарифа за тонну нужен GRT из заявки")
+        # Стоимость за тонну делится на число буксиров, работавших совместно.
+        divisor = tug_count if tug_count and tug_count > 0 else 1
         amount = gross_tonnage * rate / divisor
-        divisor_note = f" / {divisor}" if divisor != 1 else ""
+        divisor_note = f" / {divisor} букс." if divisor != 1 else ""
         note = f"{gross_tonnage} x {rate:.2f} {currency}{divisor_note}{ice_label} = {amount:.2f}"
     elif rule["unit"] == "per_hour":
-        amount = rate * work_hours / divisor
+        amount = rate * work_hours
         note = (
             f"{rate:.2f} {currency} x {format_hm(work_minutes)}{ice_label} = {amount:.2f}"
         )

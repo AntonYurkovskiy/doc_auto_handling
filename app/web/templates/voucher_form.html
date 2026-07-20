@@ -43,8 +43,17 @@
     <label>Окончание работ</label>
     <input type="datetime-local" name="finished_dt" value="{{ dtval(item.finished_dt) if item else '' }}">
 
-    <label>Совместно с</label>
-    <input name="joint_with" value="{{ item.joint_with or '' if item else '' }}">
+    <label>Совместно с (буксиры)</label>
+    <input name="joint_with" value="{{ item.joint_with or '' if item else '' }}"
+           placeholder="напр. БК Пионер — тогда стоимость за тонну делится на 2 буксира">
+
+    <label>Часы сопровождения</label>
+    <input name="escort_hours" value="{{ item.escort_hours if item and item.escort_hours is not none else '' }}"
+           placeholder="напр. 1.5 (из примечаний ваучера)">
+
+    <label>Ледовые условия</label>
+    <input type="checkbox" name="is_ice" value="1" style="width:auto"
+           {% if item and item.is_ice %}checked{% endif %}>
 
     <label>Примечания</label>
     <textarea name="remarks" rows="2">{{ item.remarks or '' if item else '' }}</textarea>

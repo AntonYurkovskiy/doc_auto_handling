@@ -60,7 +60,9 @@ settings = Settings()
 # Поля правила:
 #   unit:      per_ton | per_hour | per_operation
 #   currency:  USD | RUB
-#   divisor:   делитель итоговой суммы (см. вопрос про "/3"); по умолчанию 1
+#   divisor:   не используется расчётом (устарело); стоимость за тонну делится
+#              на число буксиров, работавших совместно (из строки ваучера
+#              «совместно с …»): 1 буксир -> /2, 2 буксира -> /3 и т.д.
 #   rate:      ставка для per_ton / per_hour (у.е.)
 #   rate_ice:  ставка в ледовых условиях (если None — используется rate)
 #   rate_weekday / rate_holiday_night: для per_operation

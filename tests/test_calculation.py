@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from app.services.calculation import calculate, format_hm, minutes_between
+from app.services.calculation import (
+    calculate,
+    format_hm,
+    minutes_between,
+    tug_count_from_joint,
+)
 
 
 def _fx(_currency: str, _on: date) -> float:
@@ -90,6 +95,30 @@ def test_escort_component_added():
     )
     base = 24199 * 0.50
     assert res.amount == round(base + 1508.0 * 1.0, 2)
+
+
+def test_per_ton_divided_by_tug_count():
+    # Два буксира (1 в «совместно с» + свой) -> делим на 2.
+    res = calculate(
+        agent="Транс-Агро",
+        work_type="швартовка",
+        gross_tonnage=8446,
+        started_dt=datetime(2026, 7, 20, 6, 0),
+        finished_dt=datetime(2026, 7, 20, 6, 50),
+        tug_count=2,
+        fx_provider=_fx,
+        dayoff_provider=_not_dayoff,
+    )
+    assert res.amount == round(8446 * 0.50 / 2, 2)
+    assert "/ 2 букс." in res.calc_note
+
+
+def test_tug_count_from_joint():
+    assert tug_count_from_joint(None) == 1
+    assert tug_count_from_joint("") == 1
+    assert tug_count_from_joint("БК Пионер") == 2
+    assert tug_count_from_joint("БК Пионер, БК Коммунар") == 3
+    assert tug_count_from_joint("Пионер и Коммунар") == 3
 
 
 def test_helpers():

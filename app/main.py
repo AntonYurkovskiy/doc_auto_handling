@@ -17,7 +17,7 @@ from app.database import get_db, init_db
 from app.models import Agent, Application, Direction, DocStatus, Ship, Tug, Voucher, Work
 from app.services import export as export_service
 from app.services.application_parser import parse_application
-from app.services.calculation import calculate
+from app.services.calculation import calculate, tug_count_from_joint
 from app.services.matching import find_candidates
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -226,6 +226,8 @@ def voucher_create(
     finished_dt: str = Form(""),
     remarks: str = Form(""),
     joint_with: str = Form(""),
+    is_ice: str = Form(""),
+    escort_hours: str = Form(""),
 ):
     if voucher_id:
         item = db.get(Voucher, int(voucher_id))
@@ -246,6 +248,11 @@ def voucher_create(
     item.finished_dt = _parse_form_dt(finished_dt)
     item.remarks = remarks or None
     item.joint_with = joint_with or None
+    item.is_ice = bool(is_ice)
+    try:
+        item.escort_hours = float(escort_hours.replace(",", ".")) if escort_hours.strip() else None
+    except ValueError:
+        item.escort_hours = None
     item.status = DocStatus.confirmed
     db.commit()
     return RedirectResponse(f"/vouchers/{item.id}", status_code=303)
@@ -301,6 +308,8 @@ def create_match(
         started_dt=voucher.started_dt,
         finished_dt=voucher.finished_dt,
         gross_tonnage=application.gross_tonnage,
+        is_ice=voucher.is_ice,
+        escort_hours=voucher.escort_hours,
     )
     db.add(work)
     application.status = DocStatus.matched
@@ -332,6 +341,7 @@ def work_calculate(work_id: int, db: Session = Depends(get_db)):
             arrived_base_dt=work.arrived_base_dt,
             is_ice=work.is_ice,
             escort_hours=work.escort_hours,
+            tug_count=tug_count_from_joint(work.voucher.joint_with if work.voucher else None),
         )
         work.amount = result.amount
         work.currency = result.currency

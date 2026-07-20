@@ -116,6 +116,9 @@ class Voucher(Base):
     remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
     joint_with: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
+    is_ice: Mapped[bool] = mapped_column(default=False)  # ледовые условия (ручной флажок)
+    escort_hours: Mapped[float | None] = mapped_column(Float, nullable=True)  # часы сопровождения
+
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
