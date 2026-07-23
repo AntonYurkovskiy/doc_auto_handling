@@ -16,3 +16,8 @@ data/files/**
 !data/files/.gitkeep
 
 .env
+
+# Customer exports and generated EDA output
+*.xls
+*.xlsx
+*.odt
