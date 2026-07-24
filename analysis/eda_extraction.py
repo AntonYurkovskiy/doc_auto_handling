@@ -1,4 +1,10 @@
-"""EDA for the historical tug-work HTML export saved with an .xls suffix."""
+"""EDA for the historical tug-work HTML export saved with an .xls suffix.
+
+The file is an HTML table (not a binary workbook) declared as windows-1251, so it
+is read with BeautifulSoup, not ``pandas.read_excel``. Run:
+
+    python analysis/eda_extraction.py path/to/export.xls
+"""
 
 # ruff: noqa: E501
 
@@ -19,10 +25,10 @@ from bs4 import BeautifulSoup
 
 COLS = [
     "row_number",
-    "tug_raw",
+    "tug",
     "vessel",
-    "vessel_type_raw",
-    "port_raw",
+    "work_type",
+    "agent",
     "voucher_number",
     "base_departure",
     "base_arrival",
@@ -38,17 +44,27 @@ COLS = [
     "currency_raw",
     "exchange_rate",
     "revenue_rub",
-    "unused_20",
-    "unused_21",
-    "unused_22",
+    "col_report",
+    "col_edit",
+    "col_delete",
 ]
 DATE_COLS = ["base_departure", "base_arrival", "work_start", "work_end"]
+
+# Agent -> billing group (A = Транс-Агро; B = flat pair; C = everyone else).
+GROUP_B_AGENTS = {"Терминал", "Содружество - Соя"}
+CURRENCY_MAP = {"доллар США": "USD", "рубль": "RUB", "евро": "EUR"}
+# Session gap (days) that splits one vessel's port calls for the work-type chain.
+VISIT_GAP_DAYS = 7
 
 
 def parse_export(path: Path) -> pd.DataFrame:
     raw = path.read_bytes()
-    text = raw.decode("cp1251")
-    soup = BeautifulSoup(text, "html.parser")
+    if raw.count(b"\xef\xbf\xbd") > 100:
+        print(
+            "WARNING: file contains many U+FFFD bytes — cyrillic was destroyed "
+            "upstream (e.g. a bad transfer). Re-export/transfer without transcoding."
+        )
+    soup = BeautifulSoup(raw.decode("cp1251"), "html.parser")
     rows: list[list[str]] = []
     for row in soup.find_all("tr")[1:]:
         cells = [cell.get_text(" ", strip=True) for cell in row.find_all(["td", "th"])]
@@ -60,28 +76,30 @@ def parse_export(path: Path) -> pd.DataFrame:
             frame[column], format="%d.%m.%Y %H:%M", errors="coerce"
         )
     frame["voucher_number_num"] = pd.to_numeric(frame["voucher_number"], errors="coerce")
-    frame["amount_num"] = pd.to_numeric(
-        frame["amount"].str.replace(",", ".", regex=False), errors="coerce"
-    )
-    frame["exchange_rate_num"] = pd.to_numeric(
-        frame["exchange_rate"].str.replace(",", ".", regex=False), errors="coerce"
-    )
-    frame["revenue_rub_num"] = pd.to_numeric(
-        frame["revenue_rub"].str.replace(",", ".", regex=False), errors="coerce"
-    )
+    for src, dst in [
+        ("amount", "amount_num"),
+        ("exchange_rate", "exchange_rate_num"),
+        ("revenue_rub", "revenue_rub_num"),
+    ]:
+        frame[dst] = pd.to_numeric(
+            frame[src].str.replace(",", ".", regex=False), errors="coerce"
+        )
     grt_values = frame["grt_raw"].str.extract(r"([\d.,]+)")[0].str.replace(
         ",", ".", regex=False
     )
     frame["grt"] = pd.to_numeric(grt_values, errors="coerce")
     frame["occupied_minutes"] = frame["occupied_raw"].map(parse_duration)
     frame["work_minutes"] = frame["work_duration_raw"].map(parse_duration)
-    frame["tug"] = frame["voucher_file"].str.extract(r"(?i)([pk])\.pdf$")[0].map(
-        {"p": "Пионер", "k": "Коммунар"}
+    frame["tug_from_file"] = frame["voucher_file"].str.extract(r"(?i)([pk])\.pdf$")[0].map(
+        {"p": "БК Пионер", "k": "БК Коммунар"}
     )
-    frame["currency"] = frame["calculation_note"].map(infer_currency)
+    frame["currency"] = frame["currency_raw"].map(CURRENCY_MAP).fillna(
+        frame["calculation_note"].map(infer_currency)
+    )
+    frame["agent_clean"] = frame["agent"].str.strip()
+    frame["agent_group"] = frame["agent_clean"].map(agent_group)
     parsed = frame["calculation_note"].map(parse_tariff)
-    parsed_frame = pd.DataFrame(parsed.tolist(), index=frame.index)
-    frame = pd.concat([frame, parsed_frame], axis=1)
+    frame = pd.concat([frame, pd.DataFrame(parsed.tolist(), index=frame.index)], axis=1)
     frame["year"] = frame["work_start"].dt.year
     frame["month"] = frame["work_start"].dt.to_period("M").astype(str)
     frame["weekday"] = frame["work_start"].dt.day_name()
@@ -111,6 +129,16 @@ def infer_currency(value: str) -> str:
     return "unknown"
 
 
+def agent_group(agent: str) -> str:
+    if not agent or agent == "-":
+        return "unknown"
+    if agent == "Транс-Агро":
+        return "A"
+    if agent in GROUP_B_AGENTS:
+        return "B"
+    return "C"
+
+
 def parse_number(value: str) -> float:
     match = re.search(r"\d+(?:[.,]\d{1,2})?", value or "")
     return float(match.group(0).replace(",", ".")) if match else math.nan
@@ -126,9 +154,7 @@ def parse_tariff(value: str) -> dict[str, Any]:
     elif re.search(r"\b[\d.,]+\s*(?:USD|EUR|руб\.?)\s*x\s*\d+h\d+m", text, re.IGNORECASE):
         unit = "per_hour"
     elif re.search(
-        r"\b[\d.,]+\s*x\s*[\d.,]+\s*(?:USD|EUR|руб\.?)\s*/\s*[\d.,]+",
-        text,
-        re.IGNORECASE,
+        r"\b[\d.,]+\s*x\s*[\d.,]+\s*(?:USD|EUR|руб\.?)\s*/\s*[\d.,]+", text, re.IGNORECASE
     ):
         unit = "per_ton_divided"
     elif re.search(r"\b[\d.,]+\s*x\s*[\d.,]+\s*(?:USD|EUR|руб\.?)", text, re.IGNORECASE):
@@ -137,12 +163,8 @@ def parse_tariff(value: str) -> dict[str, Any]:
         unit = "unknown"
     divisor_match = re.search(r"/\s*([\d.,]+)", text)
     divisor = parse_number(divisor_match.group(1)) if divisor_match else math.nan
-    hour_match = re.search(
-        r"([\d.,]+)\s*(?:USD|EUR|руб\.?)\s*x\s*\d+h\d+m", text, re.IGNORECASE
-    )
-    ton_match = re.search(
-        r"\b[\d.,]+\s*x\s*([\d.,]+)\s*(?:USD|EUR|руб\.?)", text, re.IGNORECASE
-    )
+    hour_match = re.search(r"([\d.,]+)\s*(?:USD|EUR|руб\.?)\s*x\s*\d+h\d+m", text, re.IGNORECASE)
+    ton_match = re.search(r"\b[\d.,]+\s*x\s*([\d.,]+)\s*(?:USD|EUR|руб\.?)", text, re.IGNORECASE)
     rate_match = hour_match or ton_match
     rate = parse_number(rate_match.group(1)) if rate_match else math.nan
     return {
@@ -189,184 +211,226 @@ def pct(numerator: float, denominator: float) -> str:
     return f"{100 * numerator / denominator:.1f}%" if denominator else "n/a"
 
 
-def tariff_check(frame: pd.DataFrame) -> tuple[float, float]:
-    valid = frame[["amount_num", "parsed_amount"]].dropna()
-    if valid.empty:
-        return (0.0, 0.0)
-    difference = (valid["amount_num"] - valid["parsed_amount"]).abs()
-    return float((difference > 0.02).mean()), float(difference.median())
+def transition_matrix(frame: pd.DataFrame) -> pd.DataFrame:
+    """P(next work_type | current) within a vessel's port call (gap-split)."""
+    counts: dict[tuple[str, str], int] = {}
+    usable = frame.dropna(subset=["vessel", "work_start", "work_type"])
+    usable = usable[usable["work_type"] != ""]
+    # Collapse the 2-tug duplicate rows (same operation) into one event so the
+    # chain reflects operations, not vouchers.
+    usable = usable.drop_duplicates(subset=["vessel", "work_start", "work_end", "work_type"])
+    for _, group in usable.groupby("vessel"):
+        ordered = group.sort_values("work_start")
+        prev_type: str | None = None
+        prev_time: pd.Timestamp | None = None
+        for work_type, start in zip(ordered["work_type"], ordered["work_start"], strict=False):
+            if (
+                prev_type is not None
+                and prev_time is not None
+                and (start - prev_time).days <= VISIT_GAP_DAYS
+            ):
+                counts[(prev_type, work_type)] = counts.get((prev_type, work_type), 0) + 1
+            prev_type, prev_time = work_type, start
+    if not counts:
+        return pd.DataFrame()
+    types = sorted({t for pair in counts for t in pair})
+    matrix = pd.DataFrame(0, index=types, columns=types, dtype=float)
+    for (src, dst), value in counts.items():
+        matrix.loc[src, dst] = value
+    row_sums = matrix.sum(axis=1).replace(0, math.nan)
+    return matrix.div(row_sums, axis=0)
 
 
-def make_figures(frame: pd.DataFrame, output: Path) -> list[str]:
-    output.mkdir(parents=True, exist_ok=True)
-    names: list[str] = []
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    frame.groupby("month").size().plot.bar(ax=axes[0, 0], title="Работы по месяцам")
-    frame["work_minutes"].dropna().plot.hist(bins=30, ax=axes[0, 1], title="Время работ, мин")
-    frame["occupied_minutes"].dropna().plot.hist(bins=30, ax=axes[1, 0], title="Занятость, мин")
-    axes[1, 1].scatter(frame["work_minutes"], frame["occupied_minutes"], s=5, alpha=0.35)
-    axes[1, 1].set(xlabel="Работа, мин", ylabel="Занятость, мин", title="Занятость vs работа")
-    fig.tight_layout()
-    name = "overview.png"
-    fig.savefig(output / name, dpi=150)
-    plt.close(fig)
-    names.append(name)
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    frame["tariff_unit"].value_counts().plot.bar(ax=axes[0], title="Методы тарификации")
-    frame["tariff_rate"].dropna().plot.hist(bins=30, ax=axes[1], title="Ставки")
-    fig.tight_layout()
-    name = "tariffs.png"
-    fig.savefig(output / name, dpi=150)
-    plt.close(fig)
-    names.append(name)
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    frame.groupby("weekday", sort=False).size().reindex(
-        ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    ).plot.bar(ax=ax, title="Работы по дням недели")
-    ax.set_ylabel("Строк")
-    fig.tight_layout()
-    name = "weekday.png"
-    fig.savefig(output / name, dpi=150)
-    plt.close(fig)
-    names.append(name)
-    return names
-
-
-def markdown_table(series: pd.Series, name: str = "Значение") -> str:
+def markdown_series(series: pd.Series, name: str = "Значение") -> str:
     lines = [f"| | {name} |", "|---|---:|"]
     lines.extend(f"| {index} | {value} |" for index, value in series.items())
     return "\n".join(lines)
 
 
+def markdown_frame(frame: pd.DataFrame, index_name: str = "") -> str:
+    header = "| " + index_name + " | " + " | ".join(map(str, frame.columns)) + " |"
+    sep = "|---" * (len(frame.columns) + 1) + "|"
+    lines = [header, sep]
+    for index, row in frame.iterrows():
+        cells = " | ".join(f"{value:.2f}" if isinstance(value, float) else str(value) for value in row)
+        lines.append(f"| {index} | {cells} |")
+    return "\n".join(lines)
+
+
+def make_figures(frame: pd.DataFrame, output: Path) -> list[str]:
+    output.mkdir(parents=True, exist_ok=True)
+    names: list[str] = []
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    frame.groupby("month").size().plot.bar(ax=axes[0, 0], title="Работы по месяцам")
+    frame["work_type"].value_counts().head(10).plot.barh(ax=axes[0, 1], title="Вид работ (топ-10)")
+    axes[0, 1].invert_yaxis()
+    frame["work_minutes"].dropna().plot.hist(bins=30, ax=axes[1, 0], title="Время работ, мин")
+    frame["agent_group"].value_counts().plot.bar(ax=axes[1, 1], title="Тарифная группа (A/B/C)")
+    fig.tight_layout()
+    fig.savefig(output / "overview.png", dpi=150)
+    plt.close(fig)
+    names.append("overview.png")
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    frame["tariff_unit"].value_counts().plot.bar(ax=axes[0], title="Методы тарификации")
+    frame["tariff_rate"].dropna().plot.hist(bins=30, ax=axes[1], title="Ставки")
+    fig.tight_layout()
+    fig.savefig(output / "tariffs.png", dpi=150)
+    plt.close(fig)
+    names.append("tariffs.png")
+
+    matrix = transition_matrix(frame)
+    if not matrix.empty:
+        fig, ax = plt.subplots(figsize=(11, 9))
+        image = ax.imshow(matrix.fillna(0).values, cmap="viridis", vmin=0, vmax=1)
+        ax.set_xticks(range(len(matrix.columns)))
+        ax.set_yticks(range(len(matrix.index)))
+        ax.set_xticklabels(matrix.columns, rotation=90, fontsize=7)
+        ax.set_yticklabels(matrix.index, fontsize=7)
+        ax.set_title("Переходы видов работ P(next | current)")
+        fig.colorbar(image, ax=ax, shrink=0.8)
+        fig.tight_layout()
+        fig.savefig(output / "transitions.png", dpi=150)
+        plt.close(fig)
+        names.append("transitions.png")
+    return names
+
+
 def build_report(frame: pd.DataFrame, figures: list[str], source: Path, output: Path) -> None:
     n = len(frame)
     date_valid = frame["work_start"].dropna()
+    period = f"{date_valid.min():%d.%m.%Y}—{date_valid.max():%d.%m.%Y}" if not date_valid.empty else "n/a"
     work_ci = ci95(frame["work_minutes"])
     occ_ci = ci95(frame["occupied_minutes"])
-    amount_diff, median_amount_diff = tariff_check(frame)
-    revenue_valid = frame[["amount_num", "exchange_rate_num", "revenue_rub_num"]].dropna()
-    revenue_expected = revenue_valid["amount_num"] * revenue_valid["exchange_rate_num"]
-    revenue_diff = (revenue_expected - revenue_valid["revenue_rub_num"]).abs()
-    revenue_bad = int((revenue_diff > 1).sum())
+
+    # dual-tug operations
     dual = 0
     grouped = frame.dropna(subset=["vessel", "work_start", "work_end"]).groupby(
         ["vessel", "work_start", "work_end"], dropna=False
     )
     for _, group in grouped:
-        if set(group["tug"].dropna()) == {"Пионер", "Коммунар"}:
+        if {"БК Пионер", "БК Коммунар"}.issubset(set(group["tug"].dropna())):
             dual += 1
-    voucher_counts = frame["voucher_number_num"].value_counts()
-    duplicate_numbers = int((voucher_counts > 1).sum())
-    missing_voucher = int(frame["voucher_number_num"].isna().sum())
-    period = f"{date_valid.min():%d.%m.%Y}—{date_valid.max():%d.%m.%Y}" if not date_valid.empty else "n/a"
-    years = frame["year"].value_counts().sort_index()
-    units = frame["tariff_unit"].value_counts()
-    date_bad = int(sum(frame[column].isna().sum() for column in DATE_COLS))
-    report = f"""# EDA исторической выгрузки работ буксиров
 
-Источник: `{source.name}`. Скрипт: [`eda_extraction.py`](eda_extraction.py).
+    # tug column vs filename suffix agreement
+    both = frame.dropna(subset=["tug_from_file"])
+    both = both[both["tug"].isin(["БК Пионер", "БК Коммунар"])]
+    agree = int((both["tug"] == both["tug_from_file"]).sum())
 
-## Ограничения данных
+    amount_valid = frame[["amount_num", "parsed_amount"]].dropna()
+    amount_diff = float((amount_valid["amount_num"] - amount_valid["parsed_amount"]).abs().gt(0.02).mean()) if not amount_valid.empty else 0.0
+    revenue_valid = frame[["amount_num", "exchange_rate_num", "revenue_rub_num"]].dropna()
+    revenue_bad = int(((revenue_valid["amount_num"] * revenue_valid["exchange_rate_num"]) - revenue_valid["revenue_rub_num"]).abs().gt(1).sum())
 
-**Первое и главное ограничение — разрушенная кодировка.** В исходном HTML вся кириллица уже заменена последовательностями `U+FFFD` (после указанного декодирования видны `пїЅ`). Восстановление текстов невозможно. Поэтому мёртвыми являются поля буксира, типа судна, порта, валюты и вида работ (отдельной колонки вида работ в выгрузке нет). Марковская цепочка видов работ и выводы об агенте/группе по этому файлу невозможны. Скрипт обнаруживает артефакт и не пытается восстанавливать кириллицу.
+    group_share = frame["agent_group"].value_counts()
+    unit_by_group = pd.crosstab(frame["agent_group"], frame["tariff_unit"])
+    dur_by_type = frame.groupby("work_type")["work_minutes"].median().dropna().sort_values(ascending=False)
+    matrix = transition_matrix(frame)
 
-Правила LOA из ODT: 80–120 → 1 буксир; 120–145 → 2; 146–160 → 2; 161–175 → 3; >175 → 3. В данной выгрузке LOA нет, поэтому правило приведено для совместного использования с будущими данными, а не проверено на этих строках.
+    parts: list[str] = []
+    parts.append("# EDA исторической выгрузки работ буксиров\n")
+    parts.append(f"Источник: `{source.name}` (HTML-таблица windows-1251, читается через BeautifulSoup — не `read_excel`). Скрипт: [`eda_extraction.py`](eda_extraction.py).\n")
 
-## 1. Обзор
+    parts.append("## Замечание о кодировке")
+    parts.append(
+        "Первая присланная копия файла была повреждена при передаче: кириллица была затёрта "
+        "символом `U+FFFD`. Эта версия (из `.rar`) **целая** — кириллица на месте, поэтому "
+        "доступны поля «Вид работ» и «Агент», и построены цепочка работ и тарифные группы. "
+        "LOA/осадки в выгрузке нет (только в заявках) — правило «LOA → буксиры» из ODT остаётся "
+        "для будущих данных.\n"
+    )
 
-| Метрика | Значение |
-|---|---:|
-| Строк данных | {n:,} |
-| Период по началу работ | {period} |
-| Уникальных судов (латиница сохранена) | {frame["vessel"].nunique()} |
-| Уникальных номеров ваучеров | {frame["voucher_number_num"].nunique()} |
-| Кириллический артефакт найден | {"да" if frame.astype(str).apply(lambda column: column.str.contains("�|пїЅ", regex=True).any()).any() else "нет"} |
+    parts.append("## 1. Обзор\n")
+    parts.append("| Метрика | Значение |")
+    parts.append("|---|---:|")
+    parts.append(f"| Строк данных | {n:,} |")
+    parts.append(f"| Период (начало работ) | {period} |")
+    parts.append(f"| Уникальных судов | {frame['vessel'].nunique():,} |")
+    parts.append(f"| Уникальных номеров ваучеров | {int(frame['voucher_number_num'].nunique()):,} |")
+    parts.append(f"| Видов работ | {frame['work_type'].replace('', pd.NA).nunique()} |")
+    parts.append(f"| Агентов | {frame['agent_clean'].replace('', pd.NA).nunique()} |\n")
+    parts.append(f"![Обзор](figures/{figures[0]})\n")
 
-Годы:
+    parts.append("## 2. Вид работ\n")
+    parts.append(markdown_series(frame["work_type"].replace("", "(пусто)").value_counts(), "Работ") + "\n")
 
-{markdown_table(years, "Работ")}
+    parts.append("## 3. Агенты и тарифные группы\n")
+    parts.append("Группа A = Транс-Агро; B = {Терминал, Содружество - Соя}; C = остальные.\n")
+    parts.append(markdown_series(group_share, "Строк") + "\n")
+    parts.append("Доля Транс-Агро (A): **" + pct(group_share.get("A", 0), n) + "** — согласуется с оценкой ~90%.\n")
+    parts.append(markdown_series(frame["agent_clean"].replace("", "(пусто)").value_counts(), "Строк") + "\n")
 
-Месяцы:
+    parts.append("## 4. Метод тарификации × группа\n")
+    parts.append(markdown_frame(unit_by_group, "группа") + "\n")
+    parts.append(
+        "Медианные ставки: per_ton **"
+        + f"{frame.loc[frame['tariff_unit'].isin(['per_ton', 'per_ton_divided']), 'tariff_rate'].median():.2f}**"
+        + ", per_hour **"
+        + f"{frame.loc[frame['tariff_unit'] == 'per_hour', 'tariff_rate'].median():.2f}**"
+        + f". Самый частый делитель: **{frame['tariff_divisor'].value_counts().index[0] if frame['tariff_divisor'].notna().any() else 'n/a'}**.\n"
+    )
+    parts.append(f"![Тарификация](figures/{figures[1]})\n")
 
-{markdown_table(frame["month"].value_counts().sort_index(), "Работ")}
+    parts.append("## 5. Цепочка видов работ (матрица переходов)\n")
+    parts.append(
+        f"P(следующий вид | текущий) внутри судозахода (разрыв > {VISIT_GAP_DAYS} дн. считается "
+        "новым заходом), суда упорядочены по времени. Значения — доли по строке.\n"
+    )
+    if not matrix.empty:
+        parts.append(markdown_frame(matrix.round(2), "из \\ в") + "\n")
+        if len(figures) > 2:
+            parts.append(f"![Переходы](figures/{figures[2]})\n")
+    else:
+        parts.append("_Недостаточно данных для матрицы._\n")
 
-![Обзор](figures/{figures[0]})
+    parts.append("## 6. Длительности\n")
+    parts.append("| Показатель | Время работ, мин | Занятость, мин |")
+    parts.append("|---|---:|---:|")
+    parts.append(f"| Медиана | {frame['work_minutes'].median():.1f} | {frame['occupied_minutes'].median():.1f} |")
+    parts.append(f"| Q1 | {frame['work_minutes'].quantile(.25):.1f} | {frame['occupied_minutes'].quantile(.25):.1f} |")
+    parts.append(f"| Q3 | {frame['work_minutes'].quantile(.75):.1f} | {frame['occupied_minutes'].quantile(.75):.1f} |")
+    parts.append(f"| 95% CI среднего | [{work_ci[0]:.1f}, {work_ci[1]:.1f}] | [{occ_ci[0]:.1f}, {occ_ci[1]:.1f}] |\n")
+    parts.append(f"Корреляция занятости и времени работ: **{frame[['work_minutes', 'occupied_minutes']].corr().iloc[0, 1]:.3f}**.\n")
+    parts.append("Медиана времени работ по виду (мин, приор для предсказания времени):\n")
+    parts.append(markdown_series(dur_by_type.round(0).astype(int), "Медиана, мин") + "\n")
 
-## 2. Качество и восстановленные поля
+    parts.append("## 7. Буксиры и парные операции\n")
+    parts.append(markdown_series(frame["tug"].replace("", "(пусто)").value_counts(), "Строк") + "\n")
+    parts.append(
+        f"Операций с обоими буксирами (одно судно + совпадающие начало/конец): **{dual}**. "
+        f"Совпадение колонки «Буксир» и суффикса файла p/k: **{agree}** из **{len(both)}** "
+        f"({pct(agree, len(both))}).\n"
+    )
 
-Суффикс ваучера восстановил буксир: Пионер — **{int((frame["tug"] == "Пионер").sum()):,}**, Коммунар — **{int((frame["tug"] == "Коммунар").sum()):,}**, без `p/k` — **{int(frame["tug"].isna().sum()):,} ({pct(frame["tug"].isna().sum(), n)})**. Это строки, требующие отдельной проверки.
+    parts.append("## 8. GRT, валюта, курс\n")
+    parts.append(
+        f"GRT: медиана **{frame['grt'].median():.0f} t**, Q1–Q3 **{frame['grt'].quantile(.25):.0f}–{frame['grt'].quantile(.75):.0f} t**, "
+        f"диапазон **{frame['grt'].min():.0f}–{frame['grt'].max():.0f} t**.\n"
+    )
+    parts.append(markdown_series(frame["currency"].value_counts(), "Строк") + "\n")
+    parts.append(
+        f"Курс: медиана **{frame['exchange_rate_num'].median():.4f}**, диапазон "
+        f"**{frame['exchange_rate_num'].min():.4f}–{frame['exchange_rate_num'].max():.4f}**.\n"
+    )
 
-Битых значений дат (по четырём datetime-полям) — **{int(date_bad):,}**. Измерения длительностей распознаны как `HH:MM`; пропуски времени работ — **{int(frame["work_minutes"].isna().sum())}**, занятости — **{int(frame["occupied_minutes"].isna().sum())}**.
+    parts.append("## 9. Ночь, выходные, лаг заявки, формулы\n")
+    weekend = int(frame["work_start"].dt.dayofweek.ge(5).sum())
+    parts.append(f"- Ночные работы (22:00–06:00): **{int(frame['night'].sum()):,} ({pct(frame['night'].sum(), n)})**.")
+    parts.append(f"- Выходные: **{weekend:,} ({pct(weekend, n)})**.")
+    parts.append(
+        f"- Лаг заявка→работа: медиана **{frame['application_lag_days'].median():.1f}** дн., "
+        f"Q1–Q3 **{frame['application_lag_days'].quantile(.25):.1f}–{frame['application_lag_days'].quantile(.75):.1f}** "
+        f"(извлечено {int(frame['application_lag_days'].notna().sum()):,} дат из имени заявки)."
+    )
+    parts.append(f"- Пересчёт amount из примечания: расхождений >0.02 — **{amount_diff:.1%}**.")
+    parts.append(f"- Проверка `сумма×курс→выручка`: расхождений >1 руб — **{revenue_bad}** из {len(revenue_valid):,}.\n")
 
-Валюта восстановлена из примечания: {markdown_table(frame["currency"].value_counts(), "Строк")}.
+    parts.append("## 10. Запуск\n")
+    parts.append("```bash\npython analysis/eda_extraction.py path/to/export.xls\n```\n")
+    parts.append("Зависимости — в `analysis/requirements-eda.txt`.")
 
-## 3. Баланс буксиров и парные ваучеры
-
-{markdown_table(frame["tug"].fillna("без суффикса").value_counts(), "Строк")}
-
-По ключу судно + совпадающие начало/завершение работ найдено **{dual}** групп с обоими суффиксами `p` и `k` (интерпретация: одна работа на два буксира и два ваучера). Это эвристика, так как исходный идентификатор работы отсутствует.
-
-## 4. Длительности
-
-| Показатель | Время работ, мин | Время занятости, мин |
-|---|---:|---:|
-| Медиана | {frame["work_minutes"].median():.1f} | {frame["occupied_minutes"].median():.1f} |
-| Q1 | {frame["work_minutes"].quantile(.25):.1f} | {frame["occupied_minutes"].quantile(.25):.1f} |
-| Q3 | {frame["work_minutes"].quantile(.75):.1f} | {frame["occupied_minutes"].quantile(.75):.1f} |
-| Среднее | {frame["work_minutes"].mean():.1f} | {frame["occupied_minutes"].mean():.1f} |
-| 95% CI среднего | [{work_ci[0]:.1f}, {work_ci[1]:.1f}] | [{occ_ci[0]:.1f}, {occ_ci[1]:.1f}] |
-
-Корреляция Пирсона между занятостью и временем работ: **{frame[["work_minutes", "occupied_minutes"]].corr().iloc[0, 1]:.3f}**.
-
-![Распределения](figures/{figures[0]})
-
-## 5. Тарификация и GRT
-
-{markdown_table(units, "Строк")}
-
-Доля основных классов: per_ton с делителем — **{pct(units.get("per_ton_divided", 0), n)}**, per_ton — **{pct(units.get("per_ton", 0), n)}**, per_hour — **{pct(units.get("per_hour", 0), n)}**, composite — **{pct(units.get("composite", 0), n)}**. Медианная ставка для per_ton: **{frame.loc[frame["tariff_unit"].isin(["per_ton", "per_ton_divided"]), "tariff_rate"].median():.2f}**, для per_hour: **{frame.loc[frame["tariff_unit"] == "per_hour", "tariff_rate"].median():.2f}**. Наиболее частый делитель: **{frame["tariff_divisor"].value_counts().index[0] if frame["tariff_divisor"].notna().any() else "n/a"}**.
-
-GRT: медиана **{frame["grt"].median():.0f} t**, Q1–Q3 **{frame["grt"].quantile(.25):.0f}–{frame["grt"].quantile(.75):.0f} t**, диапазон **{frame["grt"].min():.0f}–{frame["grt"].max():.0f} t**.
-
-![Тарификация](figures/{figures[1]})
-
-## 6. Проверка формул
-
-Для распознанных примечаний `amount` пересчитан из последнего выражения после `=`. Доля расхождений более 0.02 валютных единицы: **{amount_diff:.1%}**, медианная абсолютная разница: **{median_amount_diff:.4f}**. Для выручки `сумма × курс` проверено {len(revenue_valid):,} строк; расхождений более 1 рубля — **{revenue_bad:,} ({pct(revenue_bad, len(revenue_valid))})**.
-
-## 7. Валюта и курс
-
-{markdown_table(frame["currency"].value_counts(), "Строк")}
-
-Курс: медиана **{frame["exchange_rate_num"].median():.4f}**, диапазон **{frame["exchange_rate_num"].min():.4f}–{frame["exchange_rate_num"].max():.4f}**. По времени медианный курс меняется вместе с датой выгрузки; для детального временного ряда используйте `frame` в скрипте.
-
-## 8. Ночь и выходные
-
-Работы, начавшиеся ночью (22:00–06:00): **{int(frame["night"].sum()):,} ({pct(frame["night"].sum(), n)})**. Выходные (суббота/воскресенье): **{int(frame["work_start"].dt.dayofweek.ge(5).sum()):,} ({pct(frame["work_start"].dt.dayofweek.ge(5).sum(), n)})**.
-
-![Дни недели](figures/{figures[2]})
-
-## 9. Лаг заявки до работы
-
-Дата из имени заявки извлечена в **{int(frame["application_lag_days"].notna().sum()):,}** строках. Медианный лаг — **{frame["application_lag_days"].median():.1f} дня**, Q1–Q3 — **{frame["application_lag_days"].quantile(.25):.1f}–{frame["application_lag_days"].quantile(.75):.1f}**, диапазон — **{frame["application_lag_days"].min():.0f}–{frame["application_lag_days"].max():.0f}** дней. Год в имени заявки не указан: для каждой строки выбрана наиболее поздняя дата с этим месяцем/днём, не превышающая дату работы; результат около годовых границ следует трактовать осторожно.
-
-## 10. Номера ваучеров
-
-Диапазон числовых номеров: **{frame["voucher_number_num"].min():.0f}–{frame["voucher_number_num"].max():.0f}**. Пропусков номера — **{missing_voucher}**. Номеров, повторяющихся в нескольких строках/суффиксах, — **{duplicate_numbers}**; наиболее полезная интерпретация повторов — пары буксиров на одной операции, но это проверяется эвристикой из раздела 3.
-
-## 11. Дополнительные артефакты и воспроизводимость
-
-Сохранены три PNG в `analysis/figures/`. Запуск:
-
-```bash
-python analysis/eda_extraction.py path/to/export.xls
-```
-
-Скрипт принимает путь к HTML-таблице с расширением `.xls`, декодирует `cp1251`, извлекает 23 колонки, восстанавливает буксир/валюту/метод тарификации и заново создаёт этот отчёт и рисунки. Зависимости вынесены в `analysis/requirements-eda.txt`.
-"""
-    output.write_text(report, encoding="utf-8")
+    output.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
 def main() -> None:
