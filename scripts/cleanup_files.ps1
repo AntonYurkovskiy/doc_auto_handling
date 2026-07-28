@@ -29,7 +29,12 @@ $candidates = New-Object System.Collections.Generic.List[object]
 
 function Get-RelativePath {
     param([string]$Path)
-    return [System.IO.Path]::GetRelativePath($rootFull, $Path)
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    $base = $rootFull.TrimEnd($sep) + $sep
+    if ($Path.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring($base.Length)
+    }
+    return [System.IO.Path]::GetFileName($Path)
 }
 
 function Get-ByteCount {
