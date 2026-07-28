@@ -21,3 +21,5 @@ data/files/**
 *.xls
 *.xlsx
 *.odt
+analysis/*.csv
+analysis/reconcile_report.md
