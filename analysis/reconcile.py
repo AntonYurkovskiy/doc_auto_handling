@@ -56,10 +56,20 @@ def normalize_key(value: object) -> str:
     return re.sub(r"[^0-9a-zа-яё]", "", text)
 
 
+def extract_year(value: object) -> str:
+    match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value or ""))
+    return match.group(1) if match else ""
+
+
 def read_indexes(vouchers_path: Path, orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     vouchers = pd.read_csv(vouchers_path, encoding="utf-8-sig", dtype=str).fillna("")
     orders = pd.read_csv(orders_path, encoding="utf-8-sig", dtype=str).fillna("")
-    vouchers["voucher_key"] = vouchers["File"].map(normalize_key)
+    vouchers["voucher_name_key"] = vouchers["File"].map(normalize_key)
+    vouchers["voucher_year"] = vouchers["Folder"].map(extract_year)
+    vouchers["voucher_key"] = vouchers.apply(
+        lambda row: make_voucher_key(row["voucher_name_key"], row["voucher_year"]),
+        axis=1,
+    )
     orders["order_key"] = orders["Subject"].map(normalize_key)
     return vouchers, orders
 
@@ -86,6 +96,12 @@ def agent_group(value: object) -> str:
     return "C=прочие"
 
 
+def make_voucher_key(name: object, year: object) -> str:
+    name_key = str(name or "")
+    year_key = str(year or "")
+    return f"{name_key}|{year_key}" if name_key and year_key else ""
+
+
 def markdown_counts(series: pd.Series) -> str:
     lines = ["| Группа | Строк |", "|---|---:|"]
     lines.extend(f"| {index} | {value} |" for index, value in series.items())
@@ -100,7 +116,9 @@ def save_report(
     voucher_matches: pd.Series,
     order_matches: pd.Series,
 ) -> None:
-    orphan_vouchers = vouchers.loc[~vouchers["voucher_key"].isin(export["voucher_key"]), "File"]
+    orphan_vouchers = vouchers.loc[
+        ~vouchers["voucher_key"].isin(export["voucher_key"]), "File"
+    ]
     orphan_export_vouchers = export.loc[
         ~export["voucher_key"].isin(vouchers["voucher_key"]), "voucher_file"
     ]
@@ -111,9 +129,23 @@ def save_report(
     unmatched_agents = export.loc[~order_matches, "agent"].map(agent_group).value_counts()
     voucher_keys = set(vouchers.loc[vouchers["voucher_key"] != "", "voucher_key"])
     export_voucher_keys = set(export.loc[export["voucher_key"] != "", "voucher_key"])
+    voucher_name_keys = set(
+        vouchers.loc[vouchers["voucher_name_key"] != "", "voucher_name_key"]
+    )
+    export_voucher_name_keys = set(
+        export.loc[export["voucher_name_key"] != "", "voucher_name_key"]
+    )
     order_keys = set(orders.loc[orders["order_key"] != "", "order_key"])
     export_order_keys = set(export.loc[export["order_key"] != "", "order_key"])
     voucher_intersection = voucher_keys & export_voucher_keys
+    voucher_name_intersection = voucher_name_keys & export_voucher_name_keys
+    voucher_name_matches = export["voucher_name_key"].isin(voucher_name_keys)
+    voucher_year_collisions = voucher_name_matches & ~voucher_matches
+    voucher_collision_keys = set(
+        export.loc[
+            voucher_year_collisions & export["voucher_key"].ne(""), "voucher_key"
+        ]
+    )
     order_intersection = order_keys & export_order_keys
     order_row_intersection = int(orders["order_key"].isin(export_order_keys).sum())
     lines = [
@@ -121,9 +153,15 @@ def save_report(
         "",
         f"- Строк выгрузки: **{len(export):,}**.",
         (
-            f"- Ваучеров в индексе: **{len(voucher_keys):,}**; найдено в выгрузке: "
+            f"- Ваучеров в индексе: **{len(voucher_keys):,}**; связано по имени+году: "
             f"**{len(voucher_intersection):,}**; уникальных ваучеров выгрузки найдено "
             f"на диске: **{len(voucher_intersection):,}**."
+        ),
+        (
+            f"- При сверке только по имени совпало **{len(voucher_name_intersection):,}** "
+            f"уникальных имён; строк, где имя есть, но год не совпал: "
+            f"**{int(voucher_year_collisions.sum()):,}**; уникальных пар имя+год "
+            f"с такой коллизией: **{len(voucher_collision_keys):,}**."
         ),
         f"- Строк выгрузки без ваучера в индексе: **{int((~voucher_matches).sum()):,}**.",
         (
@@ -159,8 +197,10 @@ def build_combined(
 ) -> None:
     voucher_columns = vouchers[["voucher_key", "Path"]].rename(
         columns={"Path": "voucher_scan_path"}
-    )
-    order_columns = orders[["order_key", "Path"]].rename(columns={"Path": "email_path"})
+    ).drop_duplicates(subset=["voucher_key"])
+    order_columns = orders[["order_key", "Path"]].rename(
+        columns={"Path": "email_path"}
+    ).drop_duplicates(subset=["order_key"])
     combined = export.merge(voucher_columns, on="voucher_key", how="left")
     combined = combined.merge(order_columns, on="order_key", how="left")
     if not emls.empty:
@@ -183,7 +223,14 @@ def main() -> None:
 
     export = read_export(args.extraction)
     vouchers, orders = read_indexes(args.vouchers, args.orders)
-    export["voucher_key"] = export["voucher_file"].map(normalize_key)
+    export["voucher_name_key"] = export["voucher_file"].map(normalize_key)
+    export["base_year"] = export["base_departure"].map(extract_year)
+    work_year = export["work_start"].map(extract_year)
+    export.loc[export["base_year"] == "", "base_year"] = work_year
+    export["voucher_key"] = export.apply(
+        lambda row: make_voucher_key(row["voucher_name_key"], row["base_year"]),
+        axis=1,
+    )
     export["order_key"] = export["application_file"].map(normalize_key)
     voucher_matches = export["voucher_key"].isin(vouchers["voucher_key"])
     order_matches = export["order_key"].isin(orders["order_key"])
