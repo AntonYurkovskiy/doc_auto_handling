@@ -7,11 +7,16 @@ index_files.ps1 — индексирует сканы ваучеров и фай
 Или с явными путями:
     .\index_files.ps1 -VauchersDir "D:\data\vauchers" -OrdersDir "D:\data\orders" -OutDir "D:\data"
 
+Заявки — это письма .eml с нейтральными именами, поэтому тема и отправитель
+читаются из заголовков письма (Subject/From), а из темы разбираются судно/дата/причал.
+
 Результат (рядом, в -OutDir; по умолчанию текущая папка):
     vouchers_index.csv  — путь, имя, номер, суффикс p/k, буксир
-    orders_index.csv    — путь, имя, направление, судно, дата, время, причал
+    orders_index.csv    — путь, имя файла, тема письма (Subject), отправитель (From),
+                          направление, судно, дата, время, причал
 
-Пришли эти два CSV обратно — по ним собирается сверка выгрузка ↔ заявки ↔ ваучеры.
+Пришли эти два CSV обратно — по ним собирается сверка выгрузка ↔ заявки ↔ ваучеры
+(колонка «Ваучер» ↔ файл скана, колонка «Заявка» ↔ тема письма .eml).
 #>
 
 param(
@@ -31,6 +36,67 @@ function Write-CsvUtf8 {
     }
     $Rows | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8
     return @($Rows).Count
+}
+
+# Декодирование MIME encoded-words (=?charset?B/Q?...?=) в заголовках письма.
+function ConvertFrom-EncodedWords {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $rx = [regex] '=\?([^?]+)\?([BbQq])\?([^?]*)\?='
+    return $rx.Replace($Text, {
+        param($m)
+        $charset = $m.Groups[1].Value
+        $enc     = $m.Groups[2].Value.ToUpper()
+        $payload = $m.Groups[3].Value
+        try { $e = [System.Text.Encoding]::GetEncoding($charset) } catch { $e = [System.Text.Encoding]::UTF8 }
+        try {
+            if ($enc -eq 'B') {
+                $bytes = [System.Convert]::FromBase64String($payload)
+            } else {
+                $payload = $payload -replace '_', ' '
+                $ms = New-Object System.IO.MemoryStream
+                for ($i = 0; $i -lt $payload.Length; $i++) {
+                    if ($payload[$i] -eq '=' -and ($i + 2) -lt $payload.Length) {
+                        $ms.WriteByte([Convert]::ToByte($payload.Substring($i + 1, 2), 16))
+                        $i += 2
+                    } else {
+                        $ms.WriteByte([byte][char]$payload[$i])
+                    }
+                }
+                $bytes = $ms.ToArray()
+            }
+            return $e.GetString($bytes)
+        } catch { return $m.Value }
+    })
+}
+
+# Чтение заголовков Subject/From из .eml (с разворачиванием переносов).
+function Get-EmlHeaders {
+    param([string]$Path)
+    $bytes  = [System.IO.File]::ReadAllBytes($Path)
+    $latin1 = [System.Text.Encoding]::GetEncoding(28591)   # 1:1 байты -> символы
+    $text   = $latin1.GetString($bytes)
+    $idx = $text.IndexOf("`r`n`r`n")
+    if ($idx -lt 0) { $idx = $text.IndexOf("`n`n") }
+    if ($idx -ge 0) { $text = $text.Substring(0, $idx) }
+    $lines = $text -split "`r?`n"
+    $headers = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in $lines) {
+        if ($ln -match '^[ \t]' -and $headers.Count -gt 0) {
+            $headers[$headers.Count - 1] += ' ' + $ln.TrimStart()
+        } else {
+            $headers.Add($ln)
+        }
+    }
+    $subject = ''; $from = ''
+    foreach ($h in $headers) {
+        if     (-not $subject -and $h -match '^(?i)Subject:\s*(.*)$') { $subject = $Matches[1] }
+        elseif (-not $from    -and $h -match '^(?i)From:\s*(.*)$')    { $from    = $Matches[1] }
+    }
+    return [pscustomobject]@{
+        Subject = (ConvertFrom-EncodedWords $subject).Trim()
+        From    = (ConvertFrom-EncodedWords $from).Trim()
+    }
 }
 
 # ---------- Ваучеры (папка vauchers) ----------
@@ -61,9 +127,15 @@ if (Test-Path $VauchersDir) {
 Write-Host "Индексирую заявки: $OrdersDir"
 $orderRows = @()
 if (Test-Path $OrdersDir) {
-    $orderRows = Get-ChildItem -Path $OrdersDir -Recurse -File -Include *.pdf |
+    $orderRows = Get-ChildItem -Path $OrdersDir -Recurse -File -Include *.eml |
         ForEach-Object {
-            $name = $_.BaseName
+            $filePath = $_.FullName
+            # Имена .eml нейтральные — тему и отправителя читаем из заголовков письма.
+            $hdr = Get-EmlHeaders -Path $filePath
+            $subject = $hdr.Subject
+            $from    = $hdr.From
+            # Разбираем по теме письма (в выгрузке колонка «Заявка» = тема + ".pdf").
+            $name = $subject
 
             # направление: Вход / Выход / Перешвартовка (учёт префикса "Re_")
             $direction = ''
@@ -96,9 +168,11 @@ if (Test-Path $OrdersDir) {
             if ($mb.Count -gt 0) { $berth = (($mb | ForEach-Object { $_.Value }) -join ' - ') }
 
             [pscustomobject]@{
-                Path      = $_.FullName
+                Path      = $filePath
                 File      = $_.Name
                 Folder    = $_.Directory.Name
+                Subject   = $subject          # тема письма = ключ к колонке «Заявка» в выгрузке
+                From      = $from              # отправитель — определяет агента (Транс-Агро и др.)
                 Direction = $direction
                 Vessel    = $vessel
                 DateRaw   = $dateRaw
