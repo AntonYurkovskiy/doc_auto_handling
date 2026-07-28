@@ -42,6 +42,9 @@ function Write-CsvUtf8 {
 function ConvertFrom-EncodedWords {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return '' }
+    # RFC 2047: пробел между двумя соседними encoded-words не значим — убираем,
+    # иначе длинная тема из нескольких кусков склеивается с лишними пробелами.
+    $Text = [regex]::Replace($Text, '\?=\s+=\?', '?==?')
     $rx = [regex] '=\?([^?]+)\?([BbQq])\?([^?]*)\?='
     return $rx.Replace($Text, {
         param($m)
