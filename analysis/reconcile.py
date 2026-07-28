@@ -56,6 +56,12 @@ def normalize_key(value: object) -> str:
     return re.sub(r"[^0-9a-zа-яё]", "", text)
 
 
+def normalize_voucher_name(value: object) -> str:
+    text = str(value or "")
+    text = re.sub(r"\(\d+\)(?=\.[^.]+$|$)", "", text)
+    return normalize_key(text)
+
+
 def extract_year(value: object) -> str:
     match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(value or ""))
     return match.group(1) if match else ""
@@ -64,7 +70,7 @@ def extract_year(value: object) -> str:
 def read_indexes(vouchers_path: Path, orders_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     vouchers = pd.read_csv(vouchers_path, encoding="utf-8-sig", dtype=str).fillna("")
     orders = pd.read_csv(orders_path, encoding="utf-8-sig", dtype=str).fillna("")
-    vouchers["voucher_name_key"] = vouchers["File"].map(normalize_key)
+    vouchers["voucher_name_key"] = vouchers["File"].map(normalize_voucher_name)
     vouchers["voucher_year"] = vouchers["Folder"].map(extract_year)
     vouchers["voucher_key"] = vouchers.apply(
         lambda row: make_voucher_key(row["voucher_name_key"], row["voucher_year"]),
@@ -223,7 +229,7 @@ def main() -> None:
 
     export = read_export(args.extraction)
     vouchers, orders = read_indexes(args.vouchers, args.orders)
-    export["voucher_name_key"] = export["voucher_file"].map(normalize_key)
+    export["voucher_name_key"] = export["voucher_file"].map(normalize_voucher_name)
     export["base_year"] = export["base_departure"].map(extract_year)
     work_year = export["work_start"].map(extract_year)
     export.loc[export["base_year"] == "", "base_year"] = work_year
