@@ -70,16 +70,18 @@ function ConvertFrom-EncodedWords {
     })
 }
 
-# Чтение заголовков Subject/From из .eml (с разворачиванием переносов).
+# Чтение заголовков Subject/From из письма (.eml или файл без расширения).
+# Возвращает $null, если файл не похож на письмо (нет заголовков Subject/From).
 function Get-EmlHeaders {
     param([string]$Path)
     $bytes  = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -eq 0) { return $null }
     $latin1 = [System.Text.Encoding]::GetEncoding(28591)   # 1:1 байты -> символы
     $text   = $latin1.GetString($bytes)
     $idx = $text.IndexOf("`r`n`r`n")
     if ($idx -lt 0) { $idx = $text.IndexOf("`n`n") }
-    if ($idx -ge 0) { $text = $text.Substring(0, $idx) }
-    $lines = $text -split "`r?`n"
+    $headerText = if ($idx -ge 0) { $text.Substring(0, $idx) } else { $text }
+    $lines = $headerText -split "`r?`n"
     $headers = New-Object System.Collections.Generic.List[string]
     foreach ($ln in $lines) {
         if ($ln -match '^[ \t]' -and $headers.Count -gt 0) {
@@ -93,6 +95,8 @@ function Get-EmlHeaders {
         if     (-not $subject -and $h -match '^(?i)Subject:\s*(.*)$') { $subject = $Matches[1] }
         elseif (-not $from    -and $h -match '^(?i)From:\s*(.*)$')    { $from    = $Matches[1] }
     }
+    # не письмо: нет ни одного из ключевых заголовков
+    if (-not $subject -and -not $from) { return $null }
     return [pscustomobject]@{
         Subject = (ConvertFrom-EncodedWords $subject).Trim()
         From    = (ConvertFrom-EncodedWords $from).Trim()
@@ -127,11 +131,17 @@ if (Test-Path $VauchersDir) {
 Write-Host "Индексирую заявки: $OrdersDir"
 $orderRows = @()
 if (Test-Path $OrdersDir) {
-    $orderRows = Get-ChildItem -Path $OrdersDir -Recurse -File -Include *.eml |
+    # Письма часто сохранены БЕЗ расширения, поэтому берём все файлы и определяем
+    # письмо по содержимому (наличие заголовков Subject/From внутри файла).
+    $skipExt = @('.pdf', '.jpg', '.jpeg', '.png', '.tif', '.tiff', '.doc', '.docx',
+                 '.xls', '.xlsx', '.zip', '.rar', '.7z', '.csv')
+    $orderRows = Get-ChildItem -Path $OrdersDir -Recurse -File |
+        Where-Object { $skipExt -notcontains $_.Extension.ToLower() } |
         ForEach-Object {
             $filePath = $_.FullName
-            # Имена .eml нейтральные — тему и отправителя читаем из заголовков письма.
+            # Имена нейтральные — тему и отправителя читаем из заголовков письма.
             $hdr = Get-EmlHeaders -Path $filePath
+            if ($null -eq $hdr) { return }   # не письмо — пропускаем
             $subject = $hdr.Subject
             $from    = $hdr.From
             # Разбираем по теме письма (в выгрузке колонка «Заявка» = тема + ".pdf").
@@ -195,6 +205,25 @@ Write-Host "Готово."
 Write-Host "  Ваучеры: $vN  -> $vOut"
 Write-Host "  Заявки:  $oN  -> $oOut"
 
+# Диагностика, если письма не распознались: что вообще лежит в orders.
+if ($oN -eq 0 -and (Test-Path $OrdersDir)) {
+    Write-Host ""
+    Write-Host "Диагностика '$OrdersDir' — расширения файлов (пусто = без расширения):" -ForegroundColor Yellow
+    Get-ChildItem -Path $OrdersDir -Recurse -File |
+        Group-Object { $_.Extension.ToLower() } |
+        Sort-Object Count -Descending |
+        ForEach-Object { Write-Host ("  {0,6}  '{1}'" -f $_.Count, $_.Name) }
+    $sample = Get-ChildItem -Path $OrdersDir -Recurse -File | Select-Object -First 1
+    if ($sample) {
+        Write-Host ""
+        Write-Host ("Первые строки файла-примера ({0}):" -f $sample.Name) -ForegroundColor Yellow
+        (Get-Content -LiteralPath $sample.FullName -TotalCount 8 -ErrorAction SilentlyContinue) |
+            ForEach-Object { Write-Host ("  | " + $_) }
+    }
+    Write-Host ""
+    Write-Host "Пришли этот вывод — подстрою разбор под реальный формат писем." -ForegroundColor Yellow
+}
+
 # подсказка про архивы: если заявки лежат в .rar/.zip и ещё не распакованы
 $archives = @()
 if (Test-Path $OrdersDir) {
@@ -202,5 +231,5 @@ if (Test-Path $OrdersDir) {
 }
 if (@($archives).Count -gt 0) {
     Write-Host ""
-    Write-Host ("ВНИМАНИЕ: в '$OrdersDir' найдено архивов: {0}. Распакуй их (PDF-заявки), затем перезапусти скрипт." -f @($archives).Count) -ForegroundColor Yellow
+    Write-Host ("ВНИМАНИЕ: в '$OrdersDir' найдено архивов: {0}. Распакуй их, затем перезапусти скрипт." -f @($archives).Count) -ForegroundColor Yellow
 }
