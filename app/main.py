@@ -77,6 +77,24 @@ def _parse_form_dt(value: str | None) -> datetime | None:
     return None
 
 
+def _parse_form_float(value: str) -> float | None:
+    if not value.strip():
+        return None
+    try:
+        return float(value.replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_form_int(value: str) -> int | None:
+    if not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def _save_upload(file: UploadFile, folder: Path) -> str:
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / (file.filename or "upload.bin")
@@ -401,24 +419,6 @@ def vessel_new(request: Request, db: Session = Depends(get_db)):
     )
 
 
-def _parse_form_float(value: str) -> float | None:
-    if not value.strip():
-        return None
-    try:
-        return float(value.replace(",", "."))
-    except ValueError:
-        return None
-
-
-def _parse_form_int(value: str) -> int | None:
-    if not value.strip():
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
 @app.post("/vessels")
 def vessel_create(
     db: Session = Depends(get_db),
@@ -435,8 +435,8 @@ def vessel_create(
     if not name.strip():
         return RedirectResponse("/vessels", status_code=303)
     if vessel_id:
-        item = _parse_form_int(vessel_id)
-        vessel = db.get(Vessel, item) if item is not None else None
+        parsed_id = _parse_form_int(vessel_id)
+        vessel = db.get(Vessel, parsed_id) if parsed_id is not None else None
         if vessel is None:
             return RedirectResponse("/vessels", status_code=303)
     else:
