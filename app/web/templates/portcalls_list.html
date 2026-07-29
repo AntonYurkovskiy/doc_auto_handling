@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Судозаходы</h1>
+<div class="actions"><a class="btn" href="/portcalls/new">+ Добавить судозаход</a></div>
+<table>
+    <tr><th>#</th><th>Судно</th><th>Направление</th><th>ETA</th><th>ETD</th><th>Агент</th><th>Статус</th><th></th></tr>
+    {% for pc in items %}
+    <tr>
+        <td>{{ pc.id }}</td>
+        <td>{{ pc.vessel.name if pc.vessel else "—" }}</td>
+        <td>{{ pc.direction.value }}</td>
+        <td>{{ pc.eta.strftime("%d.%m.%Y %H:%M") if pc.eta else "—" }}</td>
+        <td>{{ pc.etd.strftime("%d.%m.%Y %H:%M") if pc.etd else "—" }}</td>
+        <td>{{ pc.agent or "—" }}</td>
+        <td><span class="status">{{ pc.status.value }}</span></td>
+        <td><a href="/portcalls/{{ pc.id }}">Открыть</a></td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}
