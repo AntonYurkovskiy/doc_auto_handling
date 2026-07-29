@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Суда</h1>
+<div class="actions"><a class="btn" href="/vessels/new">+ Добавить судно</a></div>
+<table>
+    <tr>
+        <th>#</th><th>Название</th><th>ИМО</th><th>Флаг</th><th>Длина, м</th>
+        <th>GRT</th><th>NRT</th><th>Заходы</th><th></th>
+    </tr>
+    {% for v in items %}
+    <tr>
+        <td>{{ v.id }}</td>
+        <td>{{ v.name }}</td>
+        <td>{{ v.imo or "—" }}</td>
+        <td>{{ v.flag or "—" }}</td>
+        <td>{{ v.loa_m if v.loa_m is not none else "—" }}</td>
+        <td>{{ v.grt or "—" }}</td>
+        <td>{{ v.nrt or "—" }}</td>
+        <td>{{ v.portcalls|length }}</td>
+        <td><a href="/vessels/{{ v.id }}">Открыть</a></td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}

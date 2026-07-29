@@ -14,7 +14,17 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db, init_db
-from app.models import Agent, Application, Direction, DocStatus, Tug, Vessel, Voucher, Work
+from app.models import (
+    Agent,
+    Application,
+    Direction,
+    DocStatus,
+    PortCall,
+    Tug,
+    Vessel,
+    Voucher,
+    Work,
+)
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
@@ -374,6 +384,170 @@ def export_csv(db: Session = Depends(get_db)):
         content=data,
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=works.csv"},
+    )
+
+
+# --- Суда -------------------------------------------------------------------
+@app.get("/vessels", response_class=HTMLResponse)
+def vessels_list(request: Request, db: Session = Depends(get_db)):
+    items = db.query(Vessel).order_by(Vessel.name).all()
+    return templates.TemplateResponse("vessels_list.html", {"request": request, "items": items})
+
+
+@app.get("/vessels/new", response_class=HTMLResponse)
+def vessel_new(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(
+        "vessel_form.html", {"request": request, "item": None, "portcalls": []}
+    )
+
+
+def _parse_form_float(value: str) -> float | None:
+    if not value.strip():
+        return None
+    try:
+        return float(value.replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_form_int(value: str) -> int | None:
+    if not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+@app.post("/vessels")
+def vessel_create(
+    db: Session = Depends(get_db),
+    vessel_id: str = Form(""),
+    name: str = Form(""),
+    imo: str = Form(""),
+    flag: str = Form(""),
+    loa_m: str = Form(""),
+    beam_m: str = Form(""),
+    draft_m: str = Form(""),
+    grt: str = Form(""),
+    nrt: str = Form(""),
+):
+    if not name.strip():
+        return RedirectResponse("/vessels", status_code=303)
+    if vessel_id:
+        item = _parse_form_int(vessel_id)
+        vessel = db.get(Vessel, item) if item is not None else None
+        if vessel is None:
+            return RedirectResponse("/vessels", status_code=303)
+    else:
+        vessel = Vessel(name=name.strip())
+        db.add(vessel)
+
+    vessel.name = name.strip()
+    vessel.imo = imo.strip() or None
+    vessel.flag = flag.strip() or None
+    vessel.loa_m = _parse_form_float(loa_m)
+    vessel.beam_m = _parse_form_float(beam_m)
+    vessel.draft_m = _parse_form_float(draft_m)
+    vessel.grt = _parse_form_int(grt)
+    vessel.nrt = _parse_form_int(nrt)
+    db.commit()
+    return RedirectResponse(f"/vessels/{vessel.id}", status_code=303)
+
+
+@app.get("/vessels/{vessel_id}", response_class=HTMLResponse)
+def vessel_detail(vessel_id: int, request: Request, db: Session = Depends(get_db)):
+    item = db.get(Vessel, vessel_id)
+    if item is None:
+        return RedirectResponse("/vessels", status_code=303)
+    return templates.TemplateResponse(
+        "vessel_form.html",
+        {"request": request, "item": item, "portcalls": item.portcalls},
+    )
+
+
+# --- Судозаходы -------------------------------------------------------------
+@app.get("/portcalls", response_class=HTMLResponse)
+def portcalls_list(request: Request, db: Session = Depends(get_db)):
+    items = db.query(PortCall).order_by(PortCall.id.desc()).all()
+    return templates.TemplateResponse("portcalls_list.html", {"request": request, "items": items})
+
+
+@app.get("/portcalls/new", response_class=HTMLResponse)
+def portcall_new(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(
+        "portcall_form.html",
+        {
+            "request": request,
+            "item": None,
+            "vessels": db.query(Vessel).order_by(Vessel.name).all(),
+            "directions": Direction,
+            "statuses": DocStatus,
+            "applications": [],
+        },
+    )
+
+
+@app.post("/portcalls")
+def portcall_create(
+    db: Session = Depends(get_db),
+    portcall_id: str = Form(""),
+    vessel_id: str = Form(""),
+    direction: str = Form("прочее"),
+    status: str = Form("new"),
+    agent: str = Form(""),
+    eta: str = Form(""),
+    etd: str = Form(""),
+    berth_from: str = Form(""),
+    berth_to: str = Form(""),
+    purpose: str = Form(""),
+    notes: str = Form(""),
+):
+    if portcall_id:
+        item_id = _parse_form_int(portcall_id)
+        item = db.get(PortCall, item_id) if item_id is not None else None
+        if item is None:
+            return RedirectResponse("/portcalls", status_code=303)
+    else:
+        item = PortCall(source="manual")
+        db.add(item)
+
+    vessel_item_id = _parse_form_int(vessel_id)
+    vessel_exists = db.get(Vessel, vessel_item_id) if vessel_item_id is not None else None
+    item.vessel_id = vessel_item_id if vessel_exists is not None else None
+    item.direction = (
+        Direction(direction) if direction in Direction._value2member_map_ else Direction.other
+    )
+    if status in DocStatus._value2member_map_:
+        item.status = DocStatus(status)
+    elif not portcall_id:
+        item.status = DocStatus.new
+    item.agent = agent.strip() or None
+    item.eta = _parse_form_dt(eta)
+    item.etd = _parse_form_dt(etd)
+    item.berth_from = berth_from.strip() or None
+    item.berth_to = berth_to.strip() or None
+    item.purpose = purpose.strip() or None
+    item.notes = notes.strip() or None
+    db.commit()
+    return RedirectResponse(f"/portcalls/{item.id}", status_code=303)
+
+
+@app.get("/portcalls/{portcall_id}", response_class=HTMLResponse)
+def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(get_db)):
+    item = db.get(PortCall, portcall_id)
+    if item is None:
+        return RedirectResponse("/portcalls", status_code=303)
+    return templates.TemplateResponse(
+        "portcall_form.html",
+        {
+            "request": request,
+            "item": item,
+            "vessels": db.query(Vessel).order_by(Vessel.name).all(),
+            "directions": Direction,
+            "statuses": DocStatus,
+            "applications": item.applications,
+        },
     )
 
 
