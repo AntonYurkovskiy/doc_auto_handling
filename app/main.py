@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db, init_db
-from app.models import Agent, Application, Direction, DocStatus, Ship, Tug, Voucher, Work
+from app.models import Agent, Application, Direction, DocStatus, Tug, Vessel, Voucher, Work
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
@@ -169,7 +169,7 @@ def application_create(
     item.destination = destination or None
     item.status = DocStatus.confirmed
     db.commit()
-    _ensure_ship(db, item.vessel_name, item.imo)
+    _ensure_vessel(db, item.vessel_name, item.imo)
     return RedirectResponse(f"/applications/{item.id}", status_code=303)
 
 
@@ -377,9 +377,9 @@ def export_csv(db: Session = Depends(get_db)):
     )
 
 
-def _ensure_ship(db: Session, name: str | None, imo: str | None) -> None:
+def _ensure_vessel(db: Session, name: str | None, imo: str | None) -> None:
     if not name:
         return
-    if not db.query(Ship).filter_by(name=name).first():
-        db.add(Ship(name=name, imo=imo))
+    if not db.query(Vessel).filter_by(name=name).first():
+        db.add(Vessel(name=name, imo=imo))
         db.commit()
