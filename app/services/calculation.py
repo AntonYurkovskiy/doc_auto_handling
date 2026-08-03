@@ -1,13 +1,4 @@
-"""Расчёт стоимости выполненной работы.
-
-Логика построена на константах из app.config (ПЛЕЙСХОЛДЕРЫ — замени на реальные).
-Функции чистые и принимают провайдеры курса/календаря аргументами — удобно тестировать.
-
-Проверено на примерах matching.xls:
-  * почасовая тарификация пропорциональна минутам: rate * (минуты / 60);
-  * выручка в рублях = сумма * курс ЦБ на дату завершения работ;
-  * для рублёвых договоров курс = 1.0.
-"""
+"""Расчёт стоимости работ по прайсу группы A."""
 
 from __future__ import annotations
 
@@ -17,10 +8,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from app.config import (
-    RATES,
-    RATES_PER_OPERATION,
     WORK_TYPE_ALIASES,
+    TariffsGroupA,
+    agent_group,
     settings,
+    tariffs_a,
 )
 from app.services.calendar_ru import is_day_off
 from app.services.cbr import get_cbr_rate
@@ -54,11 +46,7 @@ def normalize_work_type(raw: str | None) -> str | None:
 
 
 def tug_count_from_joint(joint_with: str | None) -> int:
-    """Число буксиров, работавших совместно, из строки ваучера «совместно с …».
-
-    Пусто → 1 буксир (без деления). 1 упомянутый буксир → 2 (делим на 2),
-    2 буксира → 3 (делим на 3) и т.д. — так стоимость за тонну делится поровну.
-    """
+    """Число буксиров, работавших совместно, из строки ваучера «совместно с …»."""
     if not joint_with or not joint_with.strip():
         return 1
     parts = re.split(r"[,;/]|\bи\b|\+", joint_with)
@@ -95,8 +83,14 @@ def calculate(
     tug_count: int = 1,
     fx_provider: FxProvider = get_cbr_rate,
     dayoff_provider: DayOffProvider = is_day_off,
+    tariffs: TariffsGroupA | None = None,
 ) -> CalcResult:
     """Рассчитать сумму, курс и выручку в рублях для одной работы."""
+    group = agent_group(agent)
+    if group != "A":
+        raise NotImplementedError(f"Тариф группы {group} ещё не задан (только группа A)")
+
+    tariffs = tariffs or tariffs_a
     canonical = normalize_work_type(work_type)
     if canonical is None:
         raise ValueError("Не указан вид работ")
@@ -109,42 +103,122 @@ def calculate(
     if ref_dt is None:
         raise ValueError("Не указаны даты работ")
     night_or_holiday = _is_night(ref_dt) or dayoff_provider(ref_dt.date())
-
     small_ship = (
         gross_tonnage is not None
         and gross_tonnage < settings.gross_tonnage_threshold
     )
+    currency = settings.ue_currency
+    period = "праздник/ночь" if night_or_holiday else "будни"
+    ice_label = ", лёд" if is_ice else ""
 
-    per_op_key = (agent, canonical)
-    use_per_operation = small_ship and per_op_key in RATES_PER_OPERATION
-
-    if use_per_operation:
-        amount, currency, note = _calc_per_operation(
-            per_op_key, is_ice=is_ice, night_or_holiday=night_or_holiday
+    if canonical in {"швартовка", "отшвартовка"}:
+        if gross_tonnage is None:
+            raise ValueError("Для тарифа швартовки нужен GRT из заявки")
+        if small_ship:
+            rate = _small_ship_rate(
+                tariffs,
+                "mooring_unmooring_gt_below_2000",
+                is_ice=is_ice,
+                night_or_holiday=night_or_holiday,
+            )
+            amount = rate
+            note = (
+                f"{canonical} <2000 GRT, {period}{ice_label}: "
+                f"{rate:.2f} {currency} за операцию"
+            )
+        else:
+            rate = (
+                tariffs.mooring_unmooring_gt_2000_above_ice
+                if is_ice
+                else tariffs.mooring_unmooring_gt_2000_above
+            )
+            divisor = tug_count if tug_count > 0 else 1
+            amount = gross_tonnage * rate / divisor
+            divisor_note = f" / {divisor} букс." if divisor != 1 else ""
+            note = (
+                f"{canonical}: {gross_tonnage} т x {rate:.2f} {currency}"
+                f"{divisor_note}{ice_label} = {amount:.2f}"
+            )
+    elif canonical == "перестановка":
+        if gross_tonnage is None:
+            raise ValueError("Для тарифа перестановки нужен GRT из заявки")
+        if small_ship:
+            rate = _small_ship_rate(
+                tariffs,
+                "vessel_repositioning_gt_below_2000",
+                is_ice=is_ice,
+                night_or_holiday=night_or_holiday,
+            )
+            amount = rate
+            note = (
+                f"{canonical} <2000 GRT, {period}{ice_label}: "
+                f"{rate:.2f} {currency} за операцию"
+            )
+        else:
+            rate = (
+                tariffs.vessel_repositioning_gt_2000_above_ice
+                if is_ice
+                else tariffs.vessel_repositioning_gt_2000_above
+            )
+            amount = rate * work_hours
+            note = (
+                f"{canonical}: {rate:.2f} {currency}/ч x "
+                f"{format_hm(work_minutes)}{ice_label} = {amount:.2f}"
+            )
+    elif canonical == "сопровождение":
+        if small_ship and is_ice:
+            rate = _small_ship_rate(
+                tariffs,
+                "escort_towing_gt_below_2000",
+                is_ice=True,
+                night_or_holiday=night_or_holiday,
+            )
+            source = "сопровождение буксировкой <2000 GRT"
+        else:
+            rate = (
+                tariffs.escort_vessel_meeting_departure_cargo_canal_ice
+                if is_ice
+                else tariffs.escort_vessel_meeting_departure_cargo_canal
+            )
+            source = "сопровождение по каналу"
+        amount = rate * work_hours
+        note = (
+            f"{source}: {rate:.2f} {currency}/ч x "
+            f"{format_hm(work_minutes)}{ice_label} = {amount:.2f}"
+        )
+    elif canonical == "буксировка баржи":
+        rate = tariffs.barge_towing_canal_ice if is_ice else tariffs.barge_towing_canal
+        amount = rate * work_hours
+        note = (
+            f"{canonical}: {rate:.2f} {currency}/ч x "
+            f"{format_hm(work_minutes)}{ice_label} = {amount:.2f}"
+        )
+    elif canonical == "околка льда":
+        rate = tariffs.ice_breaking_tug_vessel_approach_departure
+        amount = rate * work_hours
+        note = (
+            f"{canonical}: {rate:.2f} {currency}/ч x "
+            f"{format_hm(work_minutes)} = {amount:.2f}"
+        )
+    elif canonical == "обслуживание судна":
+        rate = tariffs.vessel_maintenance_services
+        amount = rate * work_hours
+        note = (
+            f"{canonical}: {rate:.2f} {currency}/ч x "
+            f"{format_hm(work_minutes)} = {amount:.2f}"
+        )
+    elif canonical == "обслуживание морских сооружений":
+        rate = tariffs.offshore_facilities_maintenance_services
+        amount = rate * work_hours
+        note = (
+            f"{canonical}: {rate:.2f} {currency}/ч x "
+            f"{format_hm(work_minutes)} = {amount:.2f}"
         )
     else:
-        amount, currency, note = _calc_by_rule(
-            agent=agent,
-            canonical=canonical,
-            gross_tonnage=gross_tonnage,
-            work_minutes=work_minutes,
-            work_hours=work_hours,
-            is_ice=is_ice,
-            tug_count=tug_count,
-        )
+        raise ValueError(f"Нет тарифа для вида работ '{canonical}' (группа A)")
 
-    # Доп. компонент «Сопровождение», если указаны часы сопровождения.
-    if escort_hours and escort_hours > 0:
-        escort_rule = RATES.get(agent, {}).get("сопровождение")
-        if escort_rule:
-            escort_rate = escort_rule["rate"]
-            escort_amount = escort_rate * escort_hours
-            amount += escort_amount
-            note += (
-                f"; Сопровождение: {format_hm(int(escort_hours * 60))} x "
-                f"{escort_rate:.2f} = {escort_amount:.2f}"
-            )
-
+    # escort_hours сохраняется для совместимости, но больше не добавляет компонент.
+    del escort_hours
     amount = round(amount, 2)
 
     fx_date = (finished_dt or ref_dt).date()
@@ -162,59 +236,13 @@ def calculate(
     )
 
 
-def _calc_per_operation(
-    key: tuple[str, str], *, is_ice: bool, night_or_holiday: bool
-) -> tuple[float, str, str]:
-    rule = RATES_PER_OPERATION[key]
-    currency = rule["currency"]
-    if night_or_holiday:
-        field = "holiday_night_ice" if is_ice else "holiday_night"
-        label = "праздник/ночь" + (" (лёд)" if is_ice else "")
-    else:
-        field = "weekday_ice" if is_ice else "weekday"
-        label = "будни" + (" (лёд)" if is_ice else "")
-    amount = float(rule[field])
-    note = f"{key[1]} <2000 GRT, {label}: {amount:.2f} {currency} за операцию"
-    return amount, currency, note
-
-
-def _calc_by_rule(
+def _small_ship_rate(
+    tariffs: TariffsGroupA,
+    prefix: str,
     *,
-    agent: str,
-    canonical: str,
-    gross_tonnage: int | None,
-    work_minutes: int,
-    work_hours: float,
     is_ice: bool,
-    tug_count: int = 1,
-) -> tuple[float, str, str]:
-    agent_rates = RATES.get(agent)
-    if agent_rates is None:
-        raise ValueError(f"Нет тарифов для агента: {agent}")
-    rule = agent_rates.get(canonical)
-    if rule is None:
-        raise ValueError(f"Нет тарифа для вида работ '{canonical}' у агента '{agent}'")
-
-    currency = rule["currency"]
-    rate = float(rule["rate"])
-    if is_ice and rule.get("rate_ice"):
-        rate = float(rule["rate_ice"])
-    ice_label = " (лёд)" if is_ice else ""
-
-    if rule["unit"] == "per_ton":
-        if gross_tonnage is None:
-            raise ValueError("Для тарифа за тонну нужен GRT из заявки")
-        # Стоимость за тонну делится на число буксиров, работавших совместно.
-        divisor = tug_count if tug_count and tug_count > 0 else 1
-        amount = gross_tonnage * rate / divisor
-        divisor_note = f" / {divisor} букс." if divisor != 1 else ""
-        note = f"{gross_tonnage} x {rate:.2f} {currency}{divisor_note}{ice_label} = {amount:.2f}"
-    elif rule["unit"] == "per_hour":
-        amount = rate * work_hours
-        note = (
-            f"{rate:.2f} {currency} x {format_hm(work_minutes)}{ice_label} = {amount:.2f}"
-        )
-    else:
-        raise ValueError(f"Неизвестная единица тарификации: {rule['unit']}")
-
-    return amount, currency, note
+    night_or_holiday: bool,
+) -> float:
+    suffix = "_ice_" if is_ice else "_"
+    suffix += "holiday_night" if night_or_holiday else "weekdays"
+    return float(getattr(tariffs, f"{prefix}{suffix}"))
