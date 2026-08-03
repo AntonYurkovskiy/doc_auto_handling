@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -135,6 +135,25 @@ class Operation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     portcall: Mapped[PortCall] = relationship(back_populates="operations")
+    tug_links: Mapped[list[OperationTug]] = relationship(
+        back_populates="operation", cascade="all, delete-orphan"
+    )
+
+
+class OperationTug(Base):
+    """Связь операции с назначенным буксиром."""
+
+    __tablename__ = "operation_tugs"
+    __table_args__ = (UniqueConstraint("operation_id", "tug_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation_id: Mapped[int] = mapped_column(ForeignKey("operations.id"), nullable=False)
+    tug_id: Mapped[int] = mapped_column(ForeignKey("tugs.id"), nullable=False)
+    escort: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    operation: Mapped[Operation] = relationship(back_populates="tug_links")
+    tug: Mapped[Tug] = relationship()
 
 
 class Application(Base):

@@ -21,6 +21,7 @@ from app.models import (
     DocStatus,
     Operation,
     OperationKind,
+    OperationTug,
     PortCall,
     Tug,
     Vessel,
@@ -31,6 +32,7 @@ from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
 from app.services.matching import find_candidates
+from app.services.operations import escort_likely
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
@@ -484,6 +486,8 @@ def portcall_new(request: Request, db: Session = Depends(get_db)):
             "directions": Direction,
             "statuses": DocStatus,
             "operation_kinds": OperationKind,
+            "tugs": db.query(Tug).order_by(Tug.name).all(),
+            "escort_likely": escort_likely,
             "applications": [],
         },
     )
@@ -548,6 +552,8 @@ def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(ge
             "directions": Direction,
             "statuses": DocStatus,
             "operation_kinds": OperationKind,
+            "tugs": db.query(Tug).order_by(Tug.name).all(),
+            "escort_likely": escort_likely,
             "applications": item.applications,
         },
     )
@@ -581,6 +587,48 @@ def operation_create(
     )
     db.commit()
     return RedirectResponse(f"/portcalls/{portcall_id}", status_code=303)
+
+
+@app.post("/operations/{operation_id}/tugs")
+def operation_tug_create(
+    operation_id: int,
+    db: Session = Depends(get_db),
+    tug_id: str = Form(""),
+    escort: str = Form(""),
+):
+    operation = db.get(Operation, operation_id)
+    if operation is None:
+        return RedirectResponse("/portcalls", status_code=303)
+    parsed_tug_id = _parse_form_int(tug_id)
+    tug = db.get(Tug, parsed_tug_id) if parsed_tug_id is not None else None
+    if tug is None:
+        return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
+
+    wants_escort = bool(escort)
+    link = (
+        db.query(OperationTug)
+        .filter_by(operation_id=operation_id, tug_id=tug.id)
+        .first()
+    )
+    if link is None:
+        link = OperationTug(operation_id=operation_id, tug_id=tug.id)
+        db.add(link)
+    if wants_escort and not link.escort:
+        has_other_escort = (
+            db.query(OperationTug)
+            .filter(
+                OperationTug.operation_id == operation_id,
+                OperationTug.escort.is_(True),
+                OperationTug.tug_id != tug.id,
+            )
+            .first()
+            is not None
+        )
+        link.escort = not has_other_escort
+    elif not wants_escort:
+        link.escort = False
+    db.commit()
+    return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
 
 
 def _ensure_vessel(db: Session, name: str | None, imo: str | None) -> None:

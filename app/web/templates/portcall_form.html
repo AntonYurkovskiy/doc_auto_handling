@@ -39,13 +39,35 @@
     <h3>Операции</h3>
     {% if item.operations %}
     <table>
-        <tr><th>Порядок</th><th>Вид</th><th>Осадка, м</th><th>Примечания</th></tr>
+        <tr><th>Порядок</th><th>Вид</th><th>Осадка, м</th><th>Буксиры</th><th>Примечания</th><th></th></tr>
         {% for operation in item.operations %}
         <tr>
             <td>{{ operation.seq }}</td>
             <td>{{ operation.kind.value }}</td>
-            <td>{{ operation.draft_m if operation.draft_m is not none else "—" }}</td>
+            <td>
+                {{ operation.draft_m if operation.draft_m is not none else "—" }}
+                {% if escort_likely(operation.draft_m) %}<small>(возможно сопровождение)</small>{% endif %}
+            </td>
+            <td>
+                {% if operation.tug_links %}
+                    {% for link in operation.tug_links %}
+                    {{ link.tug.name }}{% if link.escort %} (сопровождение){% endif %}{% if not loop.last %}, {% endif %}
+                    {% endfor %}
+                {% else %}—{% endif %}
+            </td>
             <td>{{ operation.notes or "—" }}</td>
+            <td>
+                <form action="/operations/{{ operation.id }}/tugs" method="post">
+                    <select name="tug_id">
+                        <option value="">—</option>
+                        {% for tug in tugs %}
+                        <option value="{{ tug.id }}">{{ tug.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <label><input type="checkbox" name="escort"> сопровождение</label>
+                    <button class="btn" type="submit">Назначить</button>
+                </form>
+            </td>
         </tr>
         {% endfor %}
     </table>
