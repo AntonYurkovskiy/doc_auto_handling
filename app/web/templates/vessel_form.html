@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ "Судно #" ~ item.id if item else "Новое судно" }}</h1>
+<form class="grid" action="/vessels" method="post">
+    {% if item %}<input type="hidden" name="vessel_id" value="{{ item.id }}">{% endif %}
+
+    <label>Название</label>
+    <input name="name" required value="{{ item.name if item else '' }}">
+    <label>№ ИМО</label>
+    <input name="imo" value="{{ item.imo or '' if item else '' }}">
+    <label>Флаг</label>
+    <input name="flag" value="{{ item.flag or '' if item else '' }}">
+    <label>Длина, м</label>
+    <input name="loa_m" value="{{ item.loa_m if item and item.loa_m is not none else '' }}">
+    <label>Ширина, м</label>
+    <input name="beam_m" value="{{ item.beam_m if item and item.beam_m is not none else '' }}">
+    <label>GRT</label>
+    <input name="grt" value="{{ item.grt if item and item.grt is not none else '' }}">
+    <label>NRT</label>
+    <input name="nrt" value="{{ item.nrt if item and item.nrt is not none else '' }}">
+    <div class="full actions"><button class="btn" type="submit">Сохранить</button></div>
+</form>
+
+{% if item %}
+<div class="card">
+    <h3>Судозаходы</h3>
+    {% if portcalls %}
+    <table>
+        <tr><th>#</th><th>Направление</th><th>ETA</th><th>ETD</th><th>Агент</th><th>Статус</th><th></th></tr>
+        {% for pc in portcalls %}
+        <tr>
+            <td>{{ pc.id }}</td>
+            <td>{{ pc.direction.value }}</td>
+            <td>{{ pc.eta.strftime("%d.%m.%Y %H:%M") if pc.eta else "—" }}</td>
+            <td>{{ pc.etd.strftime("%d.%m.%Y %H:%M") if pc.etd else "—" }}</td>
+            <td>{{ pc.agent or "—" }}</td>
+            <td><span class="status">{{ pc.status.value }}</span></td>
+            <td><a href="/portcalls/{{ pc.id }}">Открыть</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}<p class="muted">Судозаходов пока нет.</p>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

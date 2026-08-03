@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% macro dtval(v) %}{{ v.strftime("%Y-%m-%dT%H:%M") if v else "" }}{% endmacro %}
+{% block content %}
+<h1>{{ "Судозаход #" ~ item.id if item else "Новый судозаход" }}</h1>
+<form class="grid" action="/portcalls" method="post">
+    {% if item %}<input type="hidden" name="portcall_id" value="{{ item.id }}">{% endif %}
+
+    <label>Судно</label>
+    <select name="vessel_id">
+        <option value="">—</option>
+        {% for v in vessels %}
+        <option value="{{ v.id }}" {% if item and item.vessel_id == v.id %}selected{% endif %}>{{ v.name }}</option>
+        {% endfor %}
+    </select>
+    <label>Направление</label>
+    <select name="direction">
+        {% for d in directions %}
+        <option value="{{ d.value }}" {% if item and item.direction == d %}selected{% endif %}>{{ d.value }}</option>
+        {% endfor %}
+    </select>
+    <label>Статус</label>
+    <select name="status">
+        {% for s in statuses %}
+        <option value="{{ s.value }}" {% if item and item.status == s %}selected{% endif %}>{{ s.value }}</option>
+        {% endfor %}
+    </select>
+    <label>Агент</label><input name="agent" value="{{ item.agent or '' if item else '' }}">
+    <label>ETA</label><input type="datetime-local" name="eta" value="{{ dtval(item.eta) if item else '' }}">
+    <label>ETD</label><input type="datetime-local" name="etd" value="{{ dtval(item.etd) if item else '' }}">
+    <label>Причал отправления</label><input name="berth_from" value="{{ item.berth_from or '' if item else '' }}">
+    <label>Причал назначения</label><input name="berth_to" value="{{ item.berth_to or '' if item else '' }}">
+    <label>Цель</label><input name="purpose" value="{{ item.purpose or '' if item else '' }}">
+    <label>Примечания</label><textarea name="notes" rows="3">{{ item.notes or '' if item else '' }}</textarea>
+    <div class="full actions"><button class="btn" type="submit">Сохранить</button></div>
+</form>
+
+{% if item %}
+<div class="card">
+    <h3>Операции</h3>
+    {% if item.operations %}
+    <table>
+        <tr><th>Порядок</th><th>Вид</th><th>Осадка, м</th><th>Примечания</th></tr>
+        {% for operation in item.operations %}
+        <tr>
+            <td>{{ operation.seq }}</td>
+            <td>{{ operation.kind.value }}</td>
+            <td>{{ operation.draft_m if operation.draft_m is not none else "—" }}</td>
+            <td>{{ operation.notes or "—" }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}<p class="muted">Операций пока нет.</p>{% endif %}
+    <h4>Добавить операцию</h4>
+    <form class="grid" action="/portcalls/{{ item.id }}/operations" method="post">
+        <label>Вид операции</label>
+        <select name="kind">
+            {% for kind in operation_kinds %}
+            <option value="{{ kind.value }}">{{ kind.value }}</option>
+            {% endfor %}
+        </select>
+        <label>Порядок</label><input name="seq" type="number" min="1" value="1">
+        <label>Осадка, м</label><input name="draft_m">
+        <label>Примечания</label><textarea name="notes" rows="2"></textarea>
+        <div class="full actions"><button class="btn" type="submit">Добавить</button></div>
+    </form>
+</div>
+<div class="card">
+    <h3>Связанные заявки</h3>
+    {% if applications %}
+    <table>
+        <tr><th>#</th><th>Судно</th><th>Направление</th><th>GRT</th><th>Статус</th><th></th></tr>
+        {% for a in applications %}
+        <tr>
+            <td>{{ a.id }}</td>
+            <td>{{ a.vessel_name or "—" }}</td>
+            <td>{{ a.direction.value }}</td>
+            <td>{{ a.gross_tonnage or "—" }}</td>
+            <td><span class="status">{{ a.status.value }}</span></td>
+            <td><a href="/applications/{{ a.id }}">Открыть</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}<p class="muted">Связанных заявок пока нет.</p>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

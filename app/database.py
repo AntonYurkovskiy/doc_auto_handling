@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import DATA_DIR, settings
@@ -41,8 +41,28 @@ def get_db() -> Iterator[Session]:
         db.close()
 
 
+def _add_missing_columns() -> None:
+    """Идемпотентно добавить недостающие колонки в существующие таблицы.
+
+    Проект без Alembic: create_all создаёт новые таблицы, но не изменяет старые.
+    Для SQLite добавляем недостающие колонки через ALTER TABLE.
+    """
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    wanted = {"applications": [("portcall_id", "INTEGER")]}
+    with engine.begin() as conn:
+        for table, columns in wanted.items():
+            if table not in existing:
+                continue
+            present = {col["name"] for col in inspector.get_columns(table)}
+            for name, ddl_type in columns:
+                if name not in present:
+                    conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {ddl_type}'))
+
+
 def init_db() -> None:
-    """Создать таблицы и заполнить справочники значениями по умолчанию."""
+    """Создать таблицы, применить лёгкую миграцию и заполнить справочники."""
     from app import models  # noqa: F401  (регистрация моделей)
 
     Base.metadata.create_all(bind=engine)
+    _add_missing_columns()

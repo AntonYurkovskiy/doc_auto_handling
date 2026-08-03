@@ -35,6 +35,14 @@ class Direction(str, enum.Enum):
     other = "прочее"
 
 
+class OperationKind(str, enum.Enum):
+    mooring = "швартовка"
+    reshift = "перешвартовка"
+    unmooring = "отшвартовка"
+    escort = "сопровождение"
+    other = "прочее"
+
+
 class Tug(Base):
     """Буксир."""
 
@@ -52,12 +60,81 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(200), unique=True)
 
 
-class Ship(Base):
-    __tablename__ = "ships"
+class Vessel(Base):
+    """Судно-справочник: постоянные характеристики, переиспользуемые между заходами.
+
+    Данные извлекаются из HTML-тела письма-заявки (структурированная таблица) и
+    накапливаются при загрузке истории/приёме почты.
+    """
+
+    __tablename__ = "vessels"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), unique=True)
-    imo: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    imo: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)
+    flag: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    loa_m: Mapped[float | None] = mapped_column(Float, nullable=True)   # длина наибольшая
+    beam_m: Mapped[float | None] = mapped_column(Float, nullable=True)  # ширина
+    grt: Mapped[int | None] = mapped_column(Integer, nullable=True)     # валовая вместимость
+    nrt: Mapped[int | None] = mapped_column(Integer, nullable=True)     # чистая вместимость
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    portcalls: Mapped[list[PortCall]] = relationship(back_populates="vessel")
+
+
+class PortCall(Base):
+    """Судозаход: конкретный визит судна (вход/выход/перестановка).
+
+    Группирует заявки и работы одного визита; создаётся при загрузке истории или
+    приёме письма и уточняется оператором.
+    """
+
+    __tablename__ = "portcalls"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    status: Mapped[DocStatus] = mapped_column(Enum(DocStatus), default=DocStatus.new)
+
+    vessel_id: Mapped[int | None] = mapped_column(ForeignKey("vessels.id"), nullable=True)
+    direction: Mapped[Direction] = mapped_column(Enum(Direction), default=Direction.other)
+    agent: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    eta: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)   # приход/начало
+    etd: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)   # отход/конец
+
+    berth_from: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    berth_to: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    purpose: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # источник: history / email / manual
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    vessel: Mapped[Vessel | None] = relationship(back_populates="portcalls")
+    applications: Mapped[list[Application]] = relationship(back_populates="portcall")
+    operations: Mapped[list[Operation]] = relationship(
+        back_populates="portcall", order_by="Operation.seq"
+    )
+
+
+class Operation(Base):
+    """Операция в рамках конкретного судозахода."""
+
+    __tablename__ = "operations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    portcall_id: Mapped[int] = mapped_column(ForeignKey("portcalls.id"), nullable=False)
+    kind: Mapped[OperationKind] = mapped_column(
+        Enum(OperationKind), default=OperationKind.other
+    )
+    seq: Mapped[int] = mapped_column(Integer, default=1)
+    draft_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    portcall: Mapped[PortCall] = relationship(back_populates="operations")
 
 
 class Application(Base):
@@ -89,8 +166,11 @@ class Application(Base):
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    portcall_id: Mapped[int | None] = mapped_column(ForeignKey("portcalls.id"), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    portcall: Mapped[PortCall | None] = relationship(back_populates="applications")
     works: Mapped[list[Work]] = relationship(back_populates="application")
 
 
