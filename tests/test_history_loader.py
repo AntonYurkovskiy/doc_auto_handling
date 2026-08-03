@@ -9,8 +9,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Direction, DocStatus, PortCall, Vessel
-from app.services.history_loader import load_history
+from app.models import Direction, DocStatus, Operation, OperationKind, PortCall, Vessel
+from app.services.history_loader import _op_kind, load_history
 
 
 def _session():
@@ -61,7 +61,6 @@ def test_load_history_upserts_vessel_and_portcall() -> None:
     assert vessel is not None
     assert vessel.loa_m == 123.5
     assert vessel.beam_m == 20
-    assert vessel.draft_m == 7.2
     assert vessel.grt == 1000
     assert vessel.nrt == 500
     assert portcall is not None
@@ -74,11 +73,15 @@ def test_load_history_upserts_vessel_and_portcall() -> None:
     assert portcall.status is DocStatus.confirmed
     assert portcall.berth_from == "Внешний рейд"
     assert portcall.berth_to == "Причал 1"
+    assert len(portcall.operations) == 1
+    assert portcall.operations[0].kind is OperationKind.mooring
+    assert portcall.operations[0].draft_m == 7.2
 
     second = load_history(db, rows)
     assert second["vessels_created"] == 0
     assert second["portcalls_created"] == 0
     assert second["skipped"] == 2
+    assert db.query(Operation).count() == 2
 
 
 def test_load_history_accepts_utf8_sig_csv() -> None:
@@ -92,8 +95,11 @@ def test_load_history_accepts_utf8_sig_csv() -> None:
     portcall = db.scalar(select(PortCall))
 
     assert summary["portcalls_created"] == 1
-    assert vessel is not None and vessel.draft_m == 8
+    assert vessel is not None
     assert portcall is not None and portcall.direction is Direction.exit
+    assert len(portcall.operations) == 1
+    assert portcall.operations[0].kind is OperationKind.unmooring
+    assert portcall.operations[0].draft_m == 8
 
 
 def test_load_history_updates_existing_vessel_without_overwriting() -> None:
@@ -126,8 +132,11 @@ def test_load_history_updates_existing_vessel_without_overwriting() -> None:
     assert vessel.flag == "RU"
     assert vessel.loa_m == 110.5
     assert vessel.beam_m == 18
-    assert vessel.draft_m == 6.5
     assert vessel.nrt == 450
+    portcall = db.scalar(select(PortCall))
+    assert portcall is not None
+    assert portcall.operations[0].draft_m == 6.5
+    assert portcall.operations[0].kind is OperationKind.other
 
 
 def test_load_history_skips_row_without_vessel_name() -> None:
@@ -148,3 +157,8 @@ def test_load_history_skips_row_without_vessel_name() -> None:
     assert summary["skipped"] == 1
     assert summary["portcalls_created"] == 0
     assert db.query(Vessel).count() == 0
+
+
+def test_operation_kind_prioritizes_reshift_and_unmooring() -> None:
+    assert _op_kind("перешвартовка", Direction.other) is OperationKind.reshift
+    assert _op_kind("отшвартовка", Direction.other) is OperationKind.unmooring

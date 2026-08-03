@@ -9,7 +9,7 @@ from typing import Any
 from dateutil import parser as date_parser
 from sqlalchemy.orm import Session
 
-from app.models import Direction, DocStatus, PortCall, Vessel
+from app.models import Direction, DocStatus, Operation, OperationKind, PortCall, Vessel
 
 
 def _text(value: Any) -> str | None:
@@ -68,6 +68,23 @@ def _direction(value: Any) -> Direction:
     if normalized in {"выход", "exit", "out"}:
         return Direction.exit
     return Direction.other
+
+
+def _op_kind(work_type_text: Any, direction: Direction) -> OperationKind:
+    normalized = (_text(work_type_text) or "").casefold()
+    if "перешвартов" in normalized:
+        return OperationKind.reshift
+    if "отшвартов" in normalized:
+        return OperationKind.unmooring
+    if "швартов" in normalized:
+        return OperationKind.mooring
+    if "сопровожд" in normalized:
+        return OperationKind.escort
+    if direction is Direction.entry:
+        return OperationKind.mooring
+    if direction is Direction.exit:
+        return OperationKind.unmooring
+    return OperationKind.other
 
 
 def _first(row: dict, *keys: str) -> Any:
@@ -149,7 +166,6 @@ def load_history(db: Session, rows: Iterable[dict]) -> dict[str, int]:
             "grt": _int(row.get("grt")),
             "nrt": _int(row.get("nrt")),
             "imo": imo,
-            "draft_m": draft_aft if draft_aft is not None else draft_fore,
         }
         vessel_updated = False
         for field, value in values.items():
@@ -172,18 +188,26 @@ def load_history(db: Session, rows: Iterable[dict]) -> dict[str, int]:
             continue
 
         berth_from, berth_to = _berths(row, direction)
+        portcall = PortCall(
+            vessel_id=vessel.id,
+            direction=direction,
+            agent=_text(row.get("agent")),
+            eta=eta,
+            etd=etd,
+            berth_from=berth_from,
+            berth_to=berth_to,
+            purpose=_first(row, "purpose", "work_type"),
+            source="history",
+            status=DocStatus.confirmed,
+        )
+        db.add(portcall)
+        db.flush()
         db.add(
-            PortCall(
-                vessel_id=vessel.id,
-                direction=direction,
-                agent=_text(row.get("agent")),
-                eta=eta,
-                etd=etd,
-                berth_from=berth_from,
-                berth_to=berth_to,
-                purpose=_first(row, "purpose", "work_type"),
-                source="history",
-                status=DocStatus.confirmed,
+            Operation(
+                portcall_id=portcall.id,
+                kind=_op_kind(row.get("work_type"), direction),
+                seq=1,
+                draft_m=draft_aft if draft_aft is not None else draft_fore,
             )
         )
         portcall_keys.add(key)

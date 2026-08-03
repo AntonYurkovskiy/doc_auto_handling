@@ -35,6 +35,14 @@ class Direction(str, enum.Enum):
     other = "прочее"
 
 
+class OperationKind(str, enum.Enum):
+    mooring = "швартовка"
+    reshift = "перешвартовка"
+    unmooring = "отшвартовка"
+    escort = "сопровождение"
+    other = "прочее"
+
+
 class Tug(Base):
     """Буксир."""
 
@@ -68,7 +76,6 @@ class Vessel(Base):
 
     loa_m: Mapped[float | None] = mapped_column(Float, nullable=True)   # длина наибольшая
     beam_m: Mapped[float | None] = mapped_column(Float, nullable=True)  # ширина
-    draft_m: Mapped[float | None] = mapped_column(Float, nullable=True)  # осадка
     grt: Mapped[int | None] = mapped_column(Integer, nullable=True)     # валовая вместимость
     nrt: Mapped[int | None] = mapped_column(Integer, nullable=True)     # чистая вместимость
 
@@ -107,6 +114,27 @@ class PortCall(Base):
 
     vessel: Mapped[Vessel | None] = relationship(back_populates="portcalls")
     applications: Mapped[list[Application]] = relationship(back_populates="portcall")
+    operations: Mapped[list[Operation]] = relationship(
+        back_populates="portcall", order_by="Operation.seq"
+    )
+
+
+class Operation(Base):
+    """Операция в рамках конкретного судозахода."""
+
+    __tablename__ = "operations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    portcall_id: Mapped[int] = mapped_column(ForeignKey("portcalls.id"), nullable=False)
+    kind: Mapped[OperationKind] = mapped_column(
+        Enum(OperationKind), default=OperationKind.other
+    )
+    seq: Mapped[int] = mapped_column(Integer, default=1)
+    draft_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    portcall: Mapped[PortCall] = relationship(back_populates="operations")
 
 
 class Application(Base):

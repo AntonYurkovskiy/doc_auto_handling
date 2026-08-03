@@ -19,6 +19,8 @@ from app.models import (
     Application,
     Direction,
     DocStatus,
+    Operation,
+    OperationKind,
     PortCall,
     Tug,
     Vessel,
@@ -428,7 +430,6 @@ def vessel_create(
     flag: str = Form(""),
     loa_m: str = Form(""),
     beam_m: str = Form(""),
-    draft_m: str = Form(""),
     grt: str = Form(""),
     nrt: str = Form(""),
 ):
@@ -448,7 +449,6 @@ def vessel_create(
     vessel.flag = flag.strip() or None
     vessel.loa_m = _parse_form_float(loa_m)
     vessel.beam_m = _parse_form_float(beam_m)
-    vessel.draft_m = _parse_form_float(draft_m)
     vessel.grt = _parse_form_int(grt)
     vessel.nrt = _parse_form_int(nrt)
     db.commit()
@@ -483,6 +483,7 @@ def portcall_new(request: Request, db: Session = Depends(get_db)):
             "vessels": db.query(Vessel).order_by(Vessel.name).all(),
             "directions": Direction,
             "statuses": DocStatus,
+            "operation_kinds": OperationKind,
             "applications": [],
         },
     )
@@ -546,9 +547,40 @@ def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(ge
             "vessels": db.query(Vessel).order_by(Vessel.name).all(),
             "directions": Direction,
             "statuses": DocStatus,
+            "operation_kinds": OperationKind,
             "applications": item.applications,
         },
     )
+
+
+@app.post("/portcalls/{portcall_id}/operations")
+def operation_create(
+    portcall_id: int,
+    db: Session = Depends(get_db),
+    kind: str = Form("прочее"),
+    seq: str = Form("1"),
+    draft_m: str = Form(""),
+    notes: str = Form(""),
+):
+    portcall = db.get(PortCall, portcall_id)
+    if portcall is None:
+        return RedirectResponse("/portcalls", status_code=303)
+    operation_kind = (
+        OperationKind(kind)
+        if kind in OperationKind._value2member_map_
+        else OperationKind.other
+    )
+    db.add(
+        Operation(
+            portcall_id=portcall_id,
+            kind=operation_kind,
+            seq=_parse_form_int(seq) or 1,
+            draft_m=_parse_form_float(draft_m),
+            notes=notes.strip() or None,
+        )
+    )
+    db.commit()
+    return RedirectResponse(f"/portcalls/{portcall_id}", status_code=303)
 
 
 def _ensure_vessel(db: Session, name: str | None, imo: str | None) -> None:
