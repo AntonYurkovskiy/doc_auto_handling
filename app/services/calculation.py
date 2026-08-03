@@ -243,6 +243,36 @@ def _small_ship_rate(
     is_ice: bool,
     night_or_holiday: bool,
 ) -> float:
-    suffix = "_ice_" if is_ice else "_"
-    suffix += "holiday_night" if night_or_holiday else "weekdays"
-    return float(getattr(tariffs, f"{prefix}{suffix}"))
+    hn = night_or_holiday
+    if prefix == "mooring_unmooring_gt_below_2000":
+        if is_ice:
+            return (
+                tariffs.mooring_unmooring_gt_below_2000_ice_holiday_night
+                if hn
+                else tariffs.mooring_unmooring_gt_below_2000_ice_weekdays
+            )
+        return (
+            tariffs.mooring_unmooring_gt_below_2000_holiday_night
+            if hn
+            else tariffs.mooring_unmooring_gt_below_2000_weekdays
+        )
+    if prefix == "vessel_repositioning_gt_below_2000":
+        if is_ice:
+            return (
+                tariffs.vessel_repositioning_gt_below_2000_ice_holiday_night
+                if hn
+                else tariffs.vessel_repositioning_gt_below_2000_ice_weekdays
+            )
+        return (
+            tariffs.vessel_repositioning_gt_below_2000_holiday_night
+            if hn
+            else tariffs.vessel_repositioning_gt_below_2000_weekdays
+        )
+    if prefix == "escort_towing_gt_below_2000":
+        # В прайсе группы A только ледовые варианты этой услуги.
+        return (
+            tariffs.escort_towing_gt_below_2000_ice_holiday_night
+            if hn
+            else tariffs.escort_towing_gt_below_2000_ice_weekdays
+        )
+    raise ValueError(f"Неизвестный префикс тарифа: {prefix}")
