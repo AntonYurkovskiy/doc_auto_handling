@@ -9,7 +9,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import Operation, OperationTug, PortCall, Tug, Vessel
-from app.services.operations import escort_likely
+from app.services.operations import escort_likely, recommended_tug_count
 
 
 @pytest.fixture
@@ -46,11 +46,21 @@ def test_escort_likely_boundaries() -> None:
     assert escort_likely(None) is False
 
 
+def test_recommended_tug_count_boundaries() -> None:
+    assert recommended_tug_count(119) == 1
+    assert recommended_tug_count(120) == 2
+    assert recommended_tug_count(150) == 2
+    assert recommended_tug_count(160) == 2
+    assert recommended_tug_count(161) == 3
+    assert recommended_tug_count(200) == 3
+    assert recommended_tug_count(None) is None
+
+
 def test_assigns_two_tugs_and_only_one_escort(client: TestClient) -> None:
     db_generator = app.dependency_overrides[get_db]()
     db = next(db_generator)
     try:
-        vessel = Vessel(name="Test vessel")
+        vessel = Vessel(name="Test vessel", loa_m=150)
         db.add(vessel)
         db.flush()
         portcall = PortCall(vessel_id=vessel.id)
@@ -62,6 +72,7 @@ def test_assigns_two_tugs_and_only_one_escort(client: TestClient) -> None:
         db.add_all([operation, tug_one, tug_two])
         db.flush()
         operation_id = operation.id
+        portcall_id = portcall.id
         tug_one_id = tug_one.id
         tug_two_id = tug_two.id
         db.commit()
@@ -74,6 +85,11 @@ def test_assigns_two_tugs_and_only_one_escort(client: TestClient) -> None:
         follow_redirects=False,
     )
     assert first.status_code == 303
+    page = client.get(f"/portcalls/{portcall_id}")
+    assert page.status_code == 200
+    assert "назначено 1 из рекомендуемых 2" in page.text
+    assert "нужно ещё" in page.text
+
     second = client.post(
         f"/operations/{operation_id}/tugs",
         data={"tug_id": str(tug_two_id), "escort": "on"},

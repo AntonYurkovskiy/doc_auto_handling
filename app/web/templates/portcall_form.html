@@ -54,6 +54,10 @@
                     {{ link.tug.name }}{% if link.escort %} (сопровождение){% endif %}{% if not loop.last %}, {% endif %}
                     {% endfor %}
                 {% else %}—{% endif %}
+                {% set recommended = recommended_tug_count(item.vessel.loa_m if item.vessel else none) %}
+                {% if recommended is not none %}
+                <br><small>назначено {{ operation.tug_links|length }} из рекомендуемых {{ recommended }}{% if operation.tug_links|length < recommended %} (нужно ещё){% endif %}</small>
+                {% endif %}
             </td>
             <td>{{ operation.notes or "—" }}</td>
             <td>

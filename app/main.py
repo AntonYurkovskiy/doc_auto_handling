@@ -32,7 +32,7 @@ from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
 from app.services.matching import find_candidates
-from app.services.operations import escort_likely
+from app.services.operations import escort_likely, recommended_tug_count
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
@@ -488,6 +488,7 @@ def portcall_new(request: Request, db: Session = Depends(get_db)):
             "operation_kinds": OperationKind,
             "tugs": db.query(Tug).order_by(Tug.name).all(),
             "escort_likely": escort_likely,
+            "recommended_tug_count": recommended_tug_count,
             "applications": [],
         },
     )
@@ -554,6 +555,7 @@ def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(ge
             "operation_kinds": OperationKind,
             "tugs": db.query(Tug).order_by(Tug.name).all(),
             "escort_likely": escort_likely,
+            "recommended_tug_count": recommended_tug_count,
             "applications": item.applications,
         },
     )
