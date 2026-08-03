@@ -1,17 +1,4 @@
-"""Конфигурация приложения и ТАРИФНЫЕ КОНСТАНТЫ.
-
-ВАЖНО: реальные ставки — коммерческая тайна и здесь НЕ хранятся.
-Ниже стоят ПЛЕЙСХОЛДЕРЫ (условные числа), чтобы работала логика расчёта.
-Замени значения `rate` на реальные — логика останется прежней.
-
-Единицы тарификации (из прайса агента):
-    per_ton       — за 1 регистровую тонну (умножаем на GRT из заявки)
-    per_hour      — в час за каждый буксир (умножаем на часы работы, пропорционально минутам)
-    per_operation — за 1 операцию (фиксированная сумма; зависит от будни/праздник+ночь)
-
-Проверено на примерах: почасовая тарификация ПРОПОРЦИОНАЛЬНА минутам,
-например 590 у.е. * (70 мин / 60) = 688.33.
-"""
+"""Конфигурация приложения и тарифы группы A."""
 
 from __future__ import annotations
 
@@ -55,62 +42,46 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-# --- ТАРИФНЫЕ КОНСТАНТЫ (ПЛЕЙСХОЛДЕРЫ) --------------------------------------
-# Структура: RATES[агент][вид_работ] = правило.
-# Поля правила:
-#   unit:      per_ton | per_hour | per_operation
-#   currency:  USD | RUB
-#   divisor:   не используется расчётом (устарело); стоимость за тонну делится
-#              на число буксиров, работавших совместно (из строки ваучера
-#              «совместно с …»): 1 буксир -> /2, 2 буксира -> /3 и т.д.
-#   rate:      ставка для per_ton / per_hour (у.е.)
-#   rate_ice:  ставка в ледовых условиях (если None — используется rate)
-#   rate_weekday / rate_holiday_night: для per_operation
-#   escort_rate: доп. ставка сопровождения (у.е./час), если применимо
-#
-# Значения — УСЛОВНЫЕ. Проставь реальные цены.
-RATES: dict[str, dict[str, dict]] = {
-    "Транс-Агро": {
-        "швартовка": {"unit": "per_ton", "currency": "USD", "rate": 0.50,
-                      "rate_ice": None, "divisor": 1},
-        "отшвартовка": {"unit": "per_ton", "currency": "USD", "rate": 0.50,
-                        "rate_ice": None, "divisor": 1},
-        "перестановка": {"unit": "per_hour", "currency": "USD", "rate": 100.0,
-                         "rate_ice": None, "divisor": 1},
-        "сопровождение": {"unit": "per_hour", "currency": "USD", "rate": 1508.0,
-                          "rate_ice": None, "divisor": 1},
-        "обслуживание судна": {"unit": "per_hour", "currency": "USD", "rate": 590.0,
-                               "rate_ice": None, "divisor": 1},
-        "обслуживание морских сооружений": {"unit": "per_hour", "currency": "USD",
-                                            "rate": 590.0, "rate_ice": None, "divisor": 1},
-        "околка льда": {"unit": "per_hour", "currency": "USD", "rate": 200.0,
-                        "rate_ice": None, "divisor": 1},
-    },
-    # Другой договор (пример): расчёт в рублях, курс = 1.0
-    "МореСервис": {
-        "отшвартовка": {"unit": "per_hour", "currency": "RUB", "rate": 64000.0,
-                        "rate_ice": None, "divisor": 1},
-        "швартовка": {"unit": "per_hour", "currency": "RUB", "rate": 64000.0,
-                      "rate_ice": None, "divisor": 1},
-    },
-}
+class TariffsGroupA(BaseSettings):
+    """Тарифы Транс-Агро, загружаемые из переменных A_* в .env."""
 
-# Тарифы «за операцию» для судов < 2000 GRT (плейсхолдеры).
-# Ключ: (агент, вид_работ) -> {"weekday": сумма, "holiday_night": сумма, currency, ice-варианты}
-RATES_PER_OPERATION: dict[tuple[str, str], dict] = {
-    ("Транс-Агро", "швартовка"): {
-        "currency": "USD", "weekday": 1000.0, "holiday_night": 1500.0,
-        "weekday_ice": 1200.0, "holiday_night_ice": 1800.0,
-    },
-    ("Транс-Агро", "отшвартовка"): {
-        "currency": "USD", "weekday": 1000.0, "holiday_night": 1500.0,
-        "weekday_ice": 1200.0, "holiday_night_ice": 1800.0,
-    },
-    ("Транс-Агро", "перестановка"): {
-        "currency": "USD", "weekday": 800.0, "holiday_night": 1200.0,
-        "weekday_ice": 1000.0, "holiday_night_ice": 1400.0,
-    },
-}
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="A_", extra="ignore")
+
+    escort_vessel_meeting_departure_cargo_canal: float = 0
+    escort_vessel_meeting_departure_cargo_canal_ice: float = 0
+    barge_towing_canal: float = 0
+    barge_towing_canal_ice: float = 0
+    mooring_unmooring_gt_2000_above: float = 0
+    mooring_unmooring_gt_2000_above_ice: float = 0
+    vessel_repositioning_gt_2000_above: float = 0
+    vessel_repositioning_gt_2000_above_ice: float = 0
+    mooring_unmooring_gt_below_2000_weekdays: float = 0
+    mooring_unmooring_gt_below_2000_holiday_night: float = 0
+    mooring_unmooring_gt_below_2000_ice_weekdays: float = 0
+    mooring_unmooring_gt_below_2000_ice_holiday_night: float = 0
+    vessel_repositioning_gt_below_2000_weekdays: float = 0
+    vessel_repositioning_gt_below_2000_holiday_night: float = 0
+    vessel_repositioning_gt_below_2000_ice_weekdays: float = 0
+    vessel_repositioning_gt_below_2000_ice_holiday_night: float = 0
+    escort_towing_gt_below_2000_ice_weekdays: float = 0
+    escort_towing_gt_below_2000_ice_holiday_night: float = 0
+    ice_breaking_tug_vessel_approach_departure: float = 0
+    vessel_maintenance_services: float = 0
+    offshore_facilities_maintenance_services: float = 0
+
+
+tariffs_a = TariffsGroupA()
+
+GROUP_A_AGENTS = {"Транс-Агро"}
+GROUP_B_AGENTS = {"Терминал", "Содружество-Соя"}
+
+
+def agent_group(agent: str | None) -> str:
+    if agent in GROUP_A_AGENTS:
+        return "A"
+    if agent in GROUP_B_AGENTS:
+        return "B"
+    return "C"
 
 # Соответствие терминов заявки -> нормализованный вид работ.
 # заявка «вход» == швартовка; «выход»/«перешвартовка (не ТСС_)» == отшвартовка;
@@ -123,6 +94,7 @@ WORK_TYPE_ALIASES: dict[str, str] = {
     "перешвартовка": "перестановка",
     "перестановка": "перестановка",
     "сопровождение": "сопровождение",
+    "буксировка баржи": "буксировка баржи",
     "обслуживание судна": "обслуживание судна",
     "обслуживание морских сооружений": "обслуживание морских сооружений",
     "околка льда": "околка льда",
