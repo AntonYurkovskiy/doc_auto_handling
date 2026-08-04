@@ -49,7 +49,7 @@ def _add_missing_columns() -> None:
     """
     inspector = inspect(engine)
     existing = set(inspector.get_table_names())
-    wanted = {"applications": [("portcall_id", "INTEGER")]}
+    wanted = {"applications": [("portcall_id", "INTEGER"), ("message_id", "VARCHAR(500)")]}
     with engine.begin() as conn:
         for table, columns in wanted.items():
             if table not in existing:

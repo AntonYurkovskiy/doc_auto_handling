@@ -165,6 +165,7 @@ class Application(Base):
     status: Mapped[DocStatus] = mapped_column(Enum(DocStatus), default=DocStatus.new)
 
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)  # email / pdf / manual
+    message_id: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
     sender: Mapped[str | None] = mapped_column(String(200), nullable=True)
     subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
     received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
