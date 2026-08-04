@@ -1,7 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Заявки</h1>
-<div class="actions"><a class="btn" href="/applications/new">+ Добавить вручную</a></div>
+{% if mail_message %}<p class="status">{{ mail_message }}</p>{% endif %}
+<div class="actions">
+    <a class="btn" href="/applications/new">+ Добавить вручную</a>
+    <form method="post" action="/mail/fetch" style="display:inline">
+        <button class="btn" type="submit">Получить почту (IMAP)</button>
+    </form>
+</div>
 <table>
     <tr>
         <th>#</th><th>Судно</th><th>Направление</th><th>GRT</th>

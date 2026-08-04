@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import imaplib
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,7 @@ from app.models import (
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
+from app.services.imap_ingest import fetch_new_applications
 from app.services.matching import find_candidates
 from app.services.operations import escort_likely, recommended_tug_count
 
@@ -127,6 +129,24 @@ def applications_list(request: Request, db: Session = Depends(get_db)):
     items = db.query(Application).order_by(Application.id.desc()).all()
     return templates.TemplateResponse(
         "applications_list.html", {"request": request, "items": items}
+    )
+
+
+@app.post("/mail/fetch", response_class=HTMLResponse)
+def mail_fetch(request: Request, db: Session = Depends(get_db)):
+    try:
+        summary = fetch_new_applications(db)
+        mail_message = (
+            f"Приём почты: получено {summary.fetched}, "
+            f"создано {summary.created}, дублей {summary.skipped_duplicates}, "
+            f"вложений {summary.attachments_saved}."
+        )
+    except (RuntimeError, OSError, imaplib.IMAP4.error) as exc:
+        mail_message = f"Ошибка приёма почты: {exc}"
+    items = db.query(Application).order_by(Application.id.desc()).all()
+    return templates.TemplateResponse(
+        "applications_list.html",
+        {"request": request, "items": items, "mail_message": mail_message},
     )
 
 

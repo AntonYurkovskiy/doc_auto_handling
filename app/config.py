@@ -31,12 +31,16 @@ class Settings(BaseSettings):
     # Граница валовой вместимости, разделяющая тарифные схемы.
     gross_tonnage_threshold: int = 2000
 
-    # IMAP для приёма заявок по почте (Фаза 2). Оставь пустым, если не используешь.
-    imap_host: str = ""
+    # IMAP для приёма заявок по почте. Логин/пароль — только через окружение (.env).
+    # Для Яндекса с 2FA нужен пароль приложения, не основной пароль.
+    imap_host: str = "imap.yandex.ru"
+    imap_port: int = 993
+    imap_ssl: bool = True
     imap_user: str = ""
     imap_password: str = ""
     imap_folder: str = "INBOX"
-    application_sender: str = "agency@sodru.com"
+    # Фильтр отправителя (необязательно): если пусто — берём все непрочитанные письма.
+    application_sender: str = ""
 
 
 settings = Settings()
