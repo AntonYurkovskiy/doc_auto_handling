@@ -29,6 +29,12 @@
     <label>Брутто (GRT)</label>
     <input name="gross_tonnage" value="{{ item.gross_tonnage or '' if item else '' }}">
 
+    <label>Длина наибольшая (LOA), м</label>
+    <input name="loa_m" value="{{ item.loa_m if item and item.loa_m is not none else '' }}">
+
+    <label>Осадка, м</label>
+    <input name="draft_m" value="{{ item.draft_m if item and item.draft_m is not none else '' }}">
+
     <label>Дата/время входа</label>
     <input type="datetime-local" name="entry_datetime" value="{{ dtval(item.entry_datetime) if item else '' }}">
 

@@ -13,6 +13,8 @@ SAMPLE_HTML = """
   <tr><td>2</td><td>№ ИМО</td><td>9298404</td></tr>
   <tr><td>5</td><td>Дата/время входа</td><td>20.07.2026 в 04:00</td></tr>
   <tr><td>10</td><td>Брутто/нетто</td><td>8446 / 4053</td></tr>
+  <tr><td>7</td><td>Длина наибольшая</td><td>129,5 м</td></tr>
+  <tr><td>8</td><td>Осадка</td><td>9.4 м</td></tr>
   <tr><td>9</td><td>Пункт назначения/№ причала</td><td>Терминал Содружество № 7</td></tr>
 </table>
 </body></html>
@@ -38,3 +40,5 @@ def test_apply_fields_via_parse():
     assert parsed.entry_datetime is not None
     assert parsed.entry_datetime.hour == 4
     assert parsed.entry_datetime.day == 20
+    assert parsed.loa_m == 129.5
+    assert parsed.draft_m == 9.4
