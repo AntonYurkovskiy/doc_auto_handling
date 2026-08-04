@@ -25,6 +25,8 @@ class ParsedApplication:
     imo: str | None = None
     gross_tonnage: int | None = None
     net_tonnage: int | None = None
+    loa_m: float | None = None
+    draft_m: float | None = None
     entry_datetime: datetime | None = None
     exit_datetime: datetime | None = None
     destination: str | None = None
@@ -52,6 +54,13 @@ def _parse_dt(value: str) -> datetime | None:
         return datetime(y, mo, d, hh, mm)
     except ValueError:
         return None
+
+
+def _extract_float(value: str) -> float | None:
+    """Достать число с плавающей точкой (запятая или точка) из текста, напр. «9,5 м»."""
+    compact = _WS.sub("", value).replace(",", ".")
+    m = re.search(r"\d+(?:\.\d+)?", compact)
+    return float(m.group(0)) if m else None
 
 
 def _extract_int_pair(value: str) -> tuple[int | None, int | None]:
@@ -91,6 +100,10 @@ def _apply_fields(parsed: ParsedApplication, fields: dict[str, str]) -> None:
         elif "брутто" in low:
             gross, net = _extract_int_pair(value)
             parsed.gross_tonnage, parsed.net_tonnage = gross, net
+        elif "длина" in low or "loa" in low:
+            parsed.loa_m = _extract_float(value)
+        elif "осадка" in low:
+            parsed.draft_m = _extract_float(value)
         elif "входа" in low:
             parsed.entry_datetime = _parse_dt(value)
         elif "выхода" in low and "пункт" not in low:
@@ -164,6 +177,8 @@ def fields_from_text(text: str) -> dict[str, str]:
         "Название судна",
         "№ ИМО",
         "Брутто/нетто",
+        "Длина наибольшая",
+        "Осадка",
         "Дата/время входа",
         "Дата/время выхода",
         "Пункт назначения",

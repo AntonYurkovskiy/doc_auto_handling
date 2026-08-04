@@ -34,7 +34,12 @@ from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
 from app.services.imap_ingest import fetch_new_applications
 from app.services.matching import find_candidates
-from app.services.operations import escort_likely, recommended_tug_count
+from app.services.operations import (
+    calculate_operation,
+    escort_likely,
+    recommended_tug_count,
+)
+from app.services.vessels import ensure_vessel
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
@@ -176,6 +181,8 @@ async def application_upload(
         imo=parsed.imo,
         gross_tonnage=parsed.gross_tonnage,
         net_tonnage=parsed.net_tonnage,
+        loa_m=parsed.loa_m,
+        draft_m=parsed.draft_m,
         entry_datetime=parsed.entry_datetime,
         exit_datetime=parsed.exit_datetime,
         destination=parsed.destination,
@@ -185,6 +192,7 @@ async def application_upload(
     )
     db.add(app_row)
     db.commit()
+    ensure_vessel(db, app_row.vessel_name, app_row.imo, loa_m=app_row.loa_m)
     return RedirectResponse(f"/applications/{app_row.id}", status_code=303)
 
 
@@ -196,6 +204,8 @@ def application_create(
     agent: str = Form(""),
     direction: str = Form("прочее"),
     gross_tonnage: str = Form(""),
+    loa_m: str = Form(""),
+    draft_m: str = Form(""),
     entry_datetime: str = Form(""),
     exit_datetime: str = Form(""),
     destination: str = Form(""),
@@ -216,12 +226,14 @@ def application_create(
         Direction(direction) if direction in Direction._value2member_map_ else Direction.other
     )
     item.gross_tonnage = int(gross_tonnage) if gross_tonnage.strip().isdigit() else None
+    item.loa_m = _parse_form_float(loa_m)
+    item.draft_m = _parse_form_float(draft_m)
     item.entry_datetime = _parse_form_dt(entry_datetime)
     item.exit_datetime = _parse_form_dt(exit_datetime)
     item.destination = destination or None
     item.status = DocStatus.confirmed
     db.commit()
-    _ensure_vessel(db, item.vessel_name, item.imo)
+    ensure_vessel(db, item.vessel_name, item.imo, loa_m=item.loa_m)
     return RedirectResponse(f"/applications/{item.id}", status_code=303)
 
 
@@ -564,6 +576,11 @@ def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(ge
     item = db.get(PortCall, portcall_id)
     if item is None:
         return RedirectResponse("/portcalls", status_code=303)
+    total_amount = sum(op.amount for op in item.operations if op.amount is not None)
+    total_revenue = sum(op.revenue_rub for op in item.operations if op.revenue_rub is not None)
+    currency = next(
+        (op.currency for op in item.operations if op.currency), settings.ue_currency
+    )
     return templates.TemplateResponse(
         "portcall_form.html",
         {
@@ -577,6 +594,9 @@ def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(ge
             "escort_likely": escort_likely,
             "recommended_tug_count": recommended_tug_count,
             "applications": item.applications,
+            "total_amount": round(total_amount, 2),
+            "total_revenue": round(total_revenue, 2),
+            "total_currency": currency,
         },
     )
 
@@ -588,6 +608,9 @@ def operation_create(
     kind: str = Form("прочее"),
     seq: str = Form("1"),
     draft_m: str = Form(""),
+    work_start: str = Form(""),
+    work_end: str = Form(""),
+    is_ice: str = Form(""),
     notes: str = Form(""),
 ):
     portcall = db.get(PortCall, portcall_id)
@@ -604,11 +627,46 @@ def operation_create(
             kind=operation_kind,
             seq=_parse_form_int(seq) or 1,
             draft_m=_parse_form_float(draft_m),
+            work_start=_parse_form_dt(work_start),
+            work_end=_parse_form_dt(work_end),
+            is_ice=bool(is_ice),
             notes=notes.strip() or None,
         )
     )
     db.commit()
     return RedirectResponse(f"/portcalls/{portcall_id}", status_code=303)
+
+
+@app.post("/operations/{operation_id}/calculate")
+def operation_calculate(
+    operation_id: int,
+    db: Session = Depends(get_db),
+    work_start: str = Form(""),
+    work_end: str = Form(""),
+    is_ice: str = Form(""),
+):
+    operation = db.get(Operation, operation_id)
+    if operation is None:
+        return RedirectResponse("/portcalls", status_code=303)
+
+    parsed_start = _parse_form_dt(work_start)
+    parsed_end = _parse_form_dt(work_end)
+    if parsed_start is not None:
+        operation.work_start = parsed_start
+    if parsed_end is not None:
+        operation.work_end = parsed_end
+    operation.is_ice = bool(is_ice)
+    db.commit()
+
+    try:
+        calculate_operation(db, operation)
+    except (ValueError, NotImplementedError) as exc:
+        operation.amount = None
+        operation.revenue_rub = None
+        operation.calc_note = f"Ошибка расчёта: {exc}"
+        operation.calculated_at = datetime.utcnow()
+        db.commit()
+    return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
 
 
 @app.post("/operations/{operation_id}/tugs")
@@ -653,9 +711,4 @@ def operation_tug_create(
     return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
 
 
-def _ensure_vessel(db: Session, name: str | None, imo: str | None) -> None:
-    if not name:
-        return
-    if not db.query(Vessel).filter_by(name=name).first():
-        db.add(Vessel(name=name, imo=imo))
-        db.commit()
+

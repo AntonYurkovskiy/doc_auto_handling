@@ -132,6 +132,20 @@ class Operation(Base):
     seq: Mapped[int] = mapped_column(Integer, default=1)
     draft_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Время выполнения операции и ледовые условия — параметры расчёта.
+    work_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    work_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_ice: Mapped[bool] = mapped_column(default=False)
+
+    # Результат последнего расчёта стоимости операции.
+    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    cbr_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenue_rub: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calc_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    calculated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     portcall: Mapped[PortCall] = relationship(back_populates="operations")
@@ -176,6 +190,8 @@ class Application(Base):
     agent: Mapped[str | None] = mapped_column(String(200), nullable=True)
     gross_tonnage: Mapped[int | None] = mapped_column(Integer, nullable=True)
     net_tonnage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loa_m: Mapped[float | None] = mapped_column(Float, nullable=True)   # длина наибольшая
+    draft_m: Mapped[float | None] = mapped_column(Float, nullable=True)  # осадка на заход
 
     entry_datetime: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     exit_datetime: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -28,6 +28,7 @@ from app.config import Settings
 from app.config import settings as default_settings
 from app.models import Application, Direction, DocStatus
 from app.services.application_parser import parse_eml
+from app.services.vessels import ensure_vessel
 
 _ATTACHMENT_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 _NON_FILENAME = re.compile(r"[^\w.\- ]+")
@@ -140,6 +141,8 @@ def ingest_messages(
             imo=parsed.imo,
             gross_tonnage=parsed.gross_tonnage,
             net_tonnage=parsed.net_tonnage,
+            loa_m=parsed.loa_m,
+            draft_m=parsed.draft_m,
             entry_datetime=parsed.entry_datetime,
             exit_datetime=parsed.exit_datetime,
             destination=parsed.destination,
@@ -150,6 +153,7 @@ def ingest_messages(
         db.add(app_row)
         summary.created += 1
         summary.attachments_saved += _save_attachments(msg, vouchers_dir, stem)
+        ensure_vessel(db, parsed.vessel_name, parsed.imo, loa_m=parsed.loa_m)
 
     db.commit()
     return summary

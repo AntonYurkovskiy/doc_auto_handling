@@ -39,7 +39,7 @@
     <h3>Операции</h3>
     {% if item.operations %}
     <table>
-        <tr><th>Порядок</th><th>Вид</th><th>Осадка, м</th><th>Буксиры</th><th>Примечания</th><th></th></tr>
+        <tr><th>Порядок</th><th>Вид</th><th>Осадка, м</th><th>Буксиры</th><th>Время / лёд · расчёт</th><th>Стоимость</th></tr>
         {% for operation in item.operations %}
         <tr>
             <td>{{ operation.seq }}</td>
@@ -58,9 +58,6 @@
                 {% if recommended is not none %}
                 <br><small>назначено {{ operation.tug_links|length }} из рекомендуемых {{ recommended }}{% if operation.tug_links|length < recommended %} (нужно ещё){% endif %}</small>
                 {% endif %}
-            </td>
-            <td>{{ operation.notes or "—" }}</td>
-            <td>
                 <form action="/operations/{{ operation.id }}/tugs" method="post">
                     <select name="tug_id">
                         <option value="">—</option>
@@ -68,12 +65,31 @@
                         <option value="{{ tug.id }}">{{ tug.name }}</option>
                         {% endfor %}
                     </select>
-                    <label><input type="checkbox" name="escort"> сопровождение</label>
+                    <label><input type="checkbox" name="escort"> сопр.</label>
                     <button class="btn" type="submit">Назначить</button>
                 </form>
             </td>
+            <td>
+                <form action="/operations/{{ operation.id }}/calculate" method="post">
+                    <input type="datetime-local" name="work_start" value="{{ dtval(operation.work_start) }}">
+                    <input type="datetime-local" name="work_end" value="{{ dtval(operation.work_end) }}">
+                    <label><input type="checkbox" name="is_ice" {% if operation.is_ice %}checked{% endif %}> лёд</label>
+                    <button class="btn" type="submit">Рассчитать</button>
+                </form>
+            </td>
+            <td>
+                {% if operation.amount is not none %}
+                    <b>{{ "%.2f"|format(operation.amount) }} {{ operation.currency }}</b><br>
+                    <small>{{ "%.2f"|format(operation.revenue_rub) }} ₽ (курс {{ operation.cbr_rate }})</small>
+                {% else %}—{% endif %}
+                {% if operation.calc_note %}<br><small class="muted">{{ operation.calc_note }}</small>{% endif %}
+            </td>
         </tr>
         {% endfor %}
+        <tr>
+            <td colspan="5" style="text-align:right"><b>Итого по судозаходу</b></td>
+            <td><b>{{ "%.2f"|format(total_amount) }} {{ total_currency }}</b><br><small>{{ "%.2f"|format(total_revenue) }} ₽</small></td>
+        </tr>
     </table>
     {% else %}<p class="muted">Операций пока нет.</p>{% endif %}
     <h4>Добавить операцию</h4>
@@ -86,6 +102,9 @@
         </select>
         <label>Порядок</label><input name="seq" type="number" min="1" value="1">
         <label>Осадка, м</label><input name="draft_m">
+        <label>Начало работ</label><input type="datetime-local" name="work_start">
+        <label>Окончание работ</label><input type="datetime-local" name="work_end">
+        <label>Ледовые условия</label><input type="checkbox" name="is_ice">
         <label>Примечания</label><textarea name="notes" rows="2"></textarea>
         <div class="full actions"><button class="btn" type="submit">Добавить</button></div>
     </form>
