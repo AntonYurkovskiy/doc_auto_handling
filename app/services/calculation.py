@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -233,6 +233,120 @@ def calculate(
         calc_note=note,
         work_minutes=work_minutes,
         busy_minutes=busy_minutes,
+    )
+
+
+@dataclass
+class ParticipantInput:
+    """Фактический участник операции (наш буксир либо сторонний подрядчик)."""
+
+    name: str = "буксир"
+    is_external: bool = False
+    work_start: datetime | None = None
+    work_end: datetime | None = None
+    escort: bool = False
+
+
+def calculate_participants(
+    *,
+    agent: str,
+    work_type: str | None,
+    gross_tonnage: int | None,
+    participants: Sequence[ParticipantInput],
+    started_dt: datetime | None = None,
+    finished_dt: datetime | None = None,
+    participants_total: int | None = None,
+    is_ice: bool = False,
+    fx_provider: FxProvider = get_cbr_rate,
+    dayoff_provider: DayOffProvider = is_day_off,
+    tariffs: TariffsGroupA | None = None,
+) -> CalcResult:
+    """Рассчитать операцию с учётом фактических участников.
+
+    Правила: делитель швартовки/отшвартовки (GRT>=2000) — все фактические участники,
+    включая сторонних; тарифицируются только наши буксиры; перестановка считается
+    отдельно по каждому нашему буксиру (его собственные времена) и суммируется.
+    """
+    canonical = normalize_work_type(work_type)
+    own = [p for p in participants if not p.is_external]
+    total = participants_total if participants_total is not None else len(participants)
+    if total <= 0:
+        total = 1
+
+    common = {
+        "agent": agent,
+        "work_type": work_type,
+        "gross_tonnage": gross_tonnage,
+        "is_ice": is_ice,
+        "fx_provider": fx_provider,
+        "dayoff_provider": dayoff_provider,
+        "tariffs": tariffs,
+    }
+
+    if canonical == "перестановка" and own:
+        results = [
+            calculate(
+                started_dt=p.work_start or started_dt,
+                finished_dt=p.work_end or finished_dt,
+                tug_count=1,
+                **common,  # type: ignore[arg-type]
+            )
+            for p in own
+        ]
+        amount = round(sum(r.amount for r in results), 2)
+        note = "; ".join(
+            f"{p.name}: {r.calc_note}" for p, r in zip(own, results, strict=True)
+        )
+        if len(own) != len(participants):
+            note += f" (участников всего {total}, тарифицируются {len(own)})"
+        base = results[0]
+        return CalcResult(
+            amount=amount,
+            currency=base.currency,
+            cbr_rate=base.cbr_rate,
+            revenue_rub=round(amount * base.cbr_rate, 2),
+            calc_note=note,
+            work_minutes=max(r.work_minutes for r in results),
+            busy_minutes=max(r.busy_minutes for r in results),
+        )
+
+    base = calculate(
+        started_dt=started_dt,
+        finished_dt=finished_dt,
+        tug_count=total,
+        **common,  # type: ignore[arg-type]
+    )
+    if not participants:
+        return base
+
+    # Ставка за тонну делится на всех фактических участников, а тарифицируются
+    # только наши буксиры: сумма операции — их доли.
+    per_ton = canonical in {"швартовка", "отшвартовка"} and (
+        gross_tonnage is not None and gross_tonnage >= settings.gross_tonnage_threshold
+    )
+    if not per_ton:
+        if len(own) == len(participants):
+            return base
+        return CalcResult(
+            amount=base.amount,
+            currency=base.currency,
+            cbr_rate=base.cbr_rate,
+            revenue_rub=base.revenue_rub,
+            calc_note=f"{base.calc_note} (участников всего {total}, наших {len(own)})",
+            work_minutes=base.work_minutes,
+            busy_minutes=base.busy_minutes,
+        )
+
+    amount = round(base.amount * len(own), 2)
+    note = f"{base.calc_note} x {len(own)} наших букс. из {total} = {amount:.2f}"
+    return CalcResult(
+        amount=amount,
+        currency=base.currency,
+        cbr_rate=base.cbr_rate,
+        revenue_rub=round(amount * base.cbr_rate, 2),
+        calc_note=note,
+        work_minutes=base.work_minutes,
+        busy_minutes=base.busy_minutes,
     )
 
 
