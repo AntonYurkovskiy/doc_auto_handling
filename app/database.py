@@ -67,6 +67,16 @@ def _add_missing_columns() -> None:
             ("calc_note", "TEXT"),
             ("calculated_at", "DATETIME"),
         ],
+        "vouchers": [
+            ("original_filename", "VARCHAR(255)"),
+            ("content_type", "VARCHAR(100)"),
+            ("sha256", "VARCHAR(64)"),
+            ("template_id", "INTEGER"),
+            ("application_id", "INTEGER"),
+            ("operation_id", "INTEGER"),
+            ("predicted_at", "DATETIME"),
+            ("reviewed_at", "DATETIME"),
+        ],
     }
     with engine.begin() as conn:
         for table, columns in wanted.items():
@@ -81,6 +91,9 @@ def _add_missing_columns() -> None:
 def init_db() -> None:
     """Создать таблицы, применить лёгкую миграцию и заполнить справочники."""
     from app import models  # noqa: F401  (регистрация моделей)
+    from app.services.voucher_template import ensure_default_template
 
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    with SessionLocal() as db:
+        ensure_default_template(db)
