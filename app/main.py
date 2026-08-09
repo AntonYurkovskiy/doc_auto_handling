@@ -33,6 +33,7 @@ from app.models import (
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
+from app.services.html_sanitize import sanitize_email_html
 from app.services.imap_ingest import fetch_new_applications
 from app.services.matching import find_candidates
 from app.services.operations import (
@@ -55,6 +56,7 @@ from app.services.voucher_files import (
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+templates.env.filters["safe_email_html"] = sanitize_email_html
 
 app = FastAPI(title="Обработка заявок и ваучеров буксира")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), name="static")
@@ -87,6 +89,10 @@ def _seed_reference() -> None:
         db.commit()
     finally:
         db.close()
+
+
+def _known_agents(db: Session) -> list[str]:
+    return [row.name for row in db.query(Agent).all()]
 
 
 def _parse_form_dt(value: str | None) -> datetime | None:
@@ -231,7 +237,7 @@ async def application_upload(
     file: UploadFile = File(...), db: Session = Depends(get_db)
 ):
     path = _save_upload(file, settings.incoming_applications_dir)
-    parsed = parse_application(path)
+    parsed = parse_application(path, known_agents=_known_agents(db))
     app_row = Application(
         status=DocStatus.needs_review,
         source="upload",
@@ -249,8 +255,10 @@ async def application_upload(
         entry_datetime=parsed.entry_datetime,
         exit_datetime=parsed.exit_datetime,
         destination=parsed.destination,
+        agent=parsed.agent,
         tugs_text=parsed.tugs_text,
         raw_text=parsed.raw_text,
+        raw_html=parsed.raw_html,
         file_path=path,
     )
     db.add(app_row)

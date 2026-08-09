@@ -55,6 +55,7 @@ def _add_missing_columns() -> None:
             ("message_id", "VARCHAR(500)"),
             ("loa_m", "FLOAT"),
             ("draft_m", "FLOAT"),
+            ("raw_html", "TEXT"),
         ],
         "operations": [
             ("work_start", "DATETIME"),
