@@ -149,6 +149,7 @@ class Operation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     portcall: Mapped[PortCall] = relationship(back_populates="operations")
+    vouchers: Mapped[list[Voucher]] = relationship(back_populates="operation")
     tug_links: Mapped[list[OperationTug]] = relationship(
         back_populates="operation", cascade="all, delete-orphan"
     )
@@ -208,6 +209,44 @@ class Application(Base):
 
     portcall: Mapped[PortCall | None] = relationship(back_populates="applications")
     works: Mapped[list[Work]] = relationship(back_populates="application")
+    vouchers: Mapped[list[Voucher]] = relationship(back_populates="application")
+
+
+class VoucherTemplate(Base):
+    """Версия макета ваучера с нормализованными координатами регионов."""
+
+    __tablename__ = "voucher_templates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    version: Mapped[str] = mapped_column(String(50), default="1")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    regions: Mapped[list[VoucherRegion]] = relationship(
+        back_populates="template", cascade="all, delete-orphan", order_by="VoucherRegion.order"
+    )
+    vouchers: Mapped[list[Voucher]] = relationship(back_populates="template")
+
+
+class VoucherRegion(Base):
+    """Регион поля на фиксированном бланке ваучера."""
+
+    __tablename__ = "voucher_regions"
+    __table_args__ = (UniqueConstraint("template_id", "name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    template_id: Mapped[int] = mapped_column(ForeignKey("voucher_templates.id"), nullable=False)
+    name: Mapped[str] = mapped_column(String(50))
+    label: Mapped[str] = mapped_column(String(100))
+    order: Mapped[int] = mapped_column(Integer)
+    center_x: Mapped[float] = mapped_column(Float)
+    center_y: Mapped[float] = mapped_column(Float)
+    width: Mapped[float] = mapped_column(Float)
+    height: Mapped[float] = mapped_column(Float)
+
+    template: Mapped[VoucherTemplate] = relationship(back_populates="regions")
+    predictions: Mapped[list[VoucherFieldPrediction]] = relationship(back_populates="region")
 
 
 class Voucher(Base):
@@ -236,10 +275,54 @@ class Voucher(Base):
     escort_hours: Mapped[float | None] = mapped_column(Float, nullable=True)  # часы сопровождения
 
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    template_id: Mapped[int | None] = mapped_column(
+        ForeignKey("voucher_templates.id"), nullable=True
+    )
+    application_id: Mapped[int | None] = mapped_column(
+        ForeignKey("applications.id"), nullable=True
+    )
+    operation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("operations.id"), nullable=True
+    )
+    predicted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     tug: Mapped[Tug | None] = relationship()
+    template: Mapped[VoucherTemplate | None] = relationship(back_populates="vouchers")
+    application: Mapped[Application | None] = relationship(back_populates="vouchers")
+    operation: Mapped[Operation | None] = relationship(back_populates="vouchers")
+    predictions: Mapped[list[VoucherFieldPrediction]] = relationship(
+        back_populates="voucher", cascade="all, delete-orphan"
+    )
     works: Mapped[list[Work]] = relationship(back_populates="voucher")
+
+
+class VoucherFieldPrediction(Base):
+    """Предсказание одного поля ваучера и его ручное подтверждение."""
+
+    __tablename__ = "voucher_field_predictions"
+    __table_args__ = (UniqueConstraint("voucher_id", "field_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    voucher_id: Mapped[int] = mapped_column(ForeignKey("vouchers.id"), nullable=False)
+    region_id: Mapped[int | None] = mapped_column(
+        ForeignKey("voucher_regions.id"), nullable=True
+    )
+    field_name: Mapped[str] = mapped_column(String(50))
+    predicted_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    predicted_normalized_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confirmed_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(30), default="prediction")
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    voucher: Mapped[Voucher] = relationship(back_populates="predictions")
+    region: Mapped[VoucherRegion | None] = relationship(back_populates="predictions")
 
 
 class Work(Base):
