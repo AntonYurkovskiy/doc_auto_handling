@@ -201,6 +201,7 @@ class Application(Base):
     tugs_text: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_html: Mapped[str | None] = mapped_column(Text, nullable=True)  # HTML-тело письма
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     portcall_id: Mapped[int | None] = mapped_column(ForeignKey("portcalls.id"), nullable=True)

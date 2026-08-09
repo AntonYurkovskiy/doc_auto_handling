@@ -17,6 +17,9 @@
         {% for ag in agents %}
         <option value="{{ ag.name }}" {% if item and item.agent == ag.name %}selected{% endif %}>{{ ag.name }}</option>
         {% endfor %}
+        {% if item and item.agent and item.agent not in agents | map(attribute="name") | list %}
+        <option value="{{ item.agent }}" selected>{{ item.agent }} (из письма)</option>
+        {% endif %}
     </select>
 
     <label>Направление</label>
@@ -52,6 +55,15 @@
 
 {% if item and item.file_path %}
 <p class="muted">Файл: {{ item.file_path }}</p>
+{% endif %}
+{% if item and item.raw_html %}
+<div class="card">
+    <h3>Исходное письмо</h3>
+    <p class="muted">Показано без скриптов и внешних ресурсов; поля выше можно править вручную.</p>
+    <iframe title="Исходное письмо" sandbox referrerpolicy="no-referrer"
+            style="width: 100%; height: 480px; border: 1px solid #ddd; background: #fff;"
+            srcdoc="{{ item.raw_html | safe_email_html }}"></iframe>
+</div>
 {% endif %}
 {% if item and item.raw_text %}
 <div class="card">

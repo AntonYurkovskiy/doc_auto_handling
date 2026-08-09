@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.config import settings as default_settings
-from app.models import Application, Direction, DocStatus
+from app.models import Agent, Application, Direction, DocStatus
 from app.services.application_parser import parse_eml
 from app.services.vessels import ensure_vessel
 
@@ -102,6 +102,7 @@ def ingest_messages(
     vouchers_dir.mkdir(parents=True, exist_ok=True)
 
     summary = IngestSummary()
+    known_agents = [row.name for row in db.query(Agent).all()]
     for raw in raw_messages:
         summary.fetched += 1
         msg = _load_message(raw)
@@ -123,7 +124,7 @@ def ingest_messages(
         eml_path = applications_dir / f"{stem}.eml"
         eml_path.write_bytes(raw)
 
-        parsed = parse_eml(eml_path)
+        parsed = parse_eml(eml_path, known_agents=known_agents)
         direction = (
             Direction(parsed.direction)
             if parsed.direction in Direction._value2member_map_
@@ -146,8 +147,10 @@ def ingest_messages(
             entry_datetime=parsed.entry_datetime,
             exit_datetime=parsed.exit_datetime,
             destination=parsed.destination,
+            agent=parsed.agent,
             tugs_text=parsed.tugs_text,
             raw_text=parsed.raw_text,
+            raw_html=parsed.raw_html,
             file_path=str(eml_path),
         )
         db.add(app_row)
