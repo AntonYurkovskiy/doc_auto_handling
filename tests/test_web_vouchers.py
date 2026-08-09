@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,16 @@ from sqlalchemy.pool import StaticPool
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import DocStatus, Tug, Voucher, VoucherFieldPrediction
+from app.models import (
+    Application,
+    Direction,
+    DocStatus,
+    Operation,
+    OperationTug,
+    Tug,
+    Voucher,
+    VoucherFieldPrediction,
+)
 from app.services.voucher_files import resolve_stored_file, safe_basename, store_upload
 
 PDF_BYTES = b"%PDF-1.4\ntest voucher scan\n%%EOF\n"
@@ -176,7 +186,8 @@ def test_manual_save_keeps_needs_review(
         assert voucher.vessel_name == "Судно"
         assert voucher.status is DocStatus.needs_review
         assert voucher.reviewed_at is None
-        assert voucher.predictions == []
+        assert len(voucher.predictions) == 12
+        assert all(row.confirmed_value is None for row in voucher.predictions)
     finally:
         db.close()
 
@@ -244,14 +255,15 @@ def test_confirm_updates_existing_prediction(
 
     db = session_factory()
     try:
-        db.add(
-            VoucherFieldPrediction(
-                voucher_id=voucher_id,
-                field_name="voucher_number",
-                predicted_value="261",
-                confidence=0.7,
+        prediction = db.scalar(
+            select(VoucherFieldPrediction).where(
+                VoucherFieldPrediction.voucher_id == voucher_id,
+                VoucherFieldPrediction.field_name == "voucher_number",
             )
         )
+        assert prediction is not None
+        prediction.predicted_value = "261"
+        prediction.confidence = 0.7
         db.commit()
     finally:
         db.close()
@@ -273,5 +285,58 @@ def test_confirm_updates_existing_prediction(
         assert len(rows) == 1
         assert rows[0].predicted_value == "261"
         assert rows[0].confirmed_value == "262"
+    finally:
+        db.close()
+
+
+def test_confirm_links_voucher_to_application_portcall_and_operation(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    vouchers_dir: Path,
+) -> None:
+    db = session_factory()
+    try:
+        tug = Tug(name="БК Коммунар", code="k")
+        application = Application(
+            direction=Direction.entry,
+            vessel_name="Судно",
+            agent="Транс-Агро",
+            entry_datetime=datetime(2025, 1, 15, 10, 0),
+            draft_m=9.4,
+        )
+        db.add_all([tug, application])
+        db.commit()
+        tug_id, application_id = tug.id, application.id
+    finally:
+        db.close()
+
+    voucher_id = _upload(client)
+    response = client.post(
+        f"/vouchers/{voucher_id}/confirm",
+        data={
+            "application_id": str(application_id),
+            "tug_id": str(tug_id),
+            "vessel_name": "Судно",
+            "agent": "Транс-Агро",
+            "work_type": "швартовка",
+            "started_dt": "2025-01-15T10:00",
+            "finished_dt": "2025-01-15T10:30",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    db = session_factory()
+    try:
+        voucher = db.get(Voucher, voucher_id)
+        assert voucher is not None
+        assert voucher.application_id == application_id
+        assert voucher.operation_id is not None
+        operation = db.get(Operation, voucher.operation_id)
+        assert operation is not None
+        assert operation.kind.value == "швартовка"
+        participant = db.query(OperationTug).filter_by(operation_id=operation.id).one()
+        assert participant.tug_id == tug_id
+        assert participant.voucher_id == voucher_id
     finally:
         db.close()

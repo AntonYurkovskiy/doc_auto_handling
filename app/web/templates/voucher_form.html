@@ -54,6 +54,18 @@
                 {% endfor %}
             </select>
 
+            <label>Связанная заявка</label>
+            <select name="application_id">
+                <option value="">— автоматически после подтверждения —</option>
+                {% for application in applications %}
+                <option value="{{ application.id }}"
+                    {% if item and item.application_id == application.id %}selected{% endif %}>
+                    #{{ application.id }} — {{ application.vessel_name or "судно не указано" }}
+                    ({{ application.entry_datetime or application.exit_datetime or "дата не указана" }})
+                </option>
+                {% endfor %}
+            </select>
+
             <label>Вид работ</label>
             <input name="work_type" value="{{ item.work_type or '' if item else '' }}"
                    placeholder="Швартовка / Отшвартовка / Обслуживание морских сооружений ...">

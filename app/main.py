@@ -42,6 +42,7 @@ from app.services.operations import (
     recommended_tug_count,
 )
 from app.services.vessels import ensure_vessel
+from app.services.voucher import predict_and_store
 from app.services.voucher_fields import (
     VOUCHER_FIELDS,
     confirm_fields,
@@ -53,6 +54,8 @@ from app.services.voucher_files import (
     resolve_stored_file,
     store_upload,
 )
+from app.services.voucher_linking import link_voucher
+from app.services.voucher_template import ensure_default_template
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
@@ -149,6 +152,7 @@ class VoucherFormData:
     joint_with: str
     is_ice: str
     escort_hours: str
+    application_id: str
 
 
 def voucher_form_data(
@@ -165,6 +169,7 @@ def voucher_form_data(
     joint_with: str = Form(""),
     is_ice: str = Form(""),
     escort_hours: str = Form(""),
+    application_id: str = Form(""),
 ) -> VoucherFormData:
     return VoucherFormData(
         number=number,
@@ -180,6 +185,7 @@ def voucher_form_data(
         joint_with=joint_with,
         is_ice=is_ice,
         escort_hours=escort_hours,
+        application_id=application_id,
     )
 
 
@@ -338,26 +344,27 @@ def voucher_new(request: Request, db: Session = Depends(get_db)):
             "preview": "none",
             "voucher_file_url": None,
             "fields": [],
+            "applications": db.query(Application).order_by(Application.id.desc()).all(),
         },
     )
 
 
 @app.post("/vouchers/upload")
 async def voucher_upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    # Ваучер — скан-картинка/PDF; распознавание полей появится позже.
-    # Файл сохраняем под безопасным именем, поля подтверждает оператор в карточке.
     stored = store_upload(
         file.file, file.filename, file.content_type, settings.incoming_vouchers_dir
     )
     voucher = Voucher(
         status=DocStatus.needs_review,
+        template=ensure_default_template(db),
         file_path=str(stored.path),
         original_filename=stored.original_filename,
         content_type=stored.content_type,
         sha256=stored.sha256,
     )
     db.add(voucher)
-    db.commit()
+    db.flush()
+    predict_and_store(db, voucher)
     return RedirectResponse(f"/vouchers/{voucher.id}", status_code=303)
 
 
@@ -375,6 +382,8 @@ def _apply_voucher_form(item: Voucher, form: VoucherFormData) -> None:
     item.joint_with = form.joint_with or None
     item.is_ice = bool(form.is_ice)
     item.escort_hours = _parse_form_float(form.escort_hours)
+    application_id = _parse_form_int(form.application_id)
+    item.application_id = application_id
 
 
 @app.post("/vouchers")
@@ -393,6 +402,10 @@ def voucher_create(
         db.add(item)
 
     _apply_voucher_form(item, form)
+    if item.application_id is not None and item.template_id is None:
+        item.template = ensure_default_template(db)
+    if item.application is not None:
+        predict_and_store(db, item, item.application)
     # Ручное сохранение без подтверждения не завершает проверку ваучера.
     if item.status in (DocStatus.new, DocStatus.needs_review):
         item.status = DocStatus.needs_review
@@ -412,7 +425,12 @@ def voucher_confirm(
 
     _apply_voucher_form(item, form)
     db.flush()
+    if item.template_id is None:
+        item.template = ensure_default_template(db)
+    if item.application is not None:
+        predict_and_store(db, item, item.application)
     confirm_fields(db, item, datetime.utcnow())
+    link_voucher(db, item, item.application)
     item.status = DocStatus.confirmed
     item.reviewed_at = datetime.utcnow()
     db.commit()
@@ -487,6 +505,7 @@ def voucher_detail(voucher_id: int, request: Request, db: Session = Depends(get_
             "preview": preview,
             "voucher_file_url": file_url,
             "fields": [(field, predictions.get(field.name)) for field in VOUCHER_FIELDS],
+            "applications": db.query(Application).order_by(Application.id.desc()).all(),
         },
     )
 
@@ -763,7 +782,6 @@ def operation_create(
     portcall_id: int,
     db: Session = Depends(get_db),
     kind: str = Form("прочее"),
-    seq: str = Form("1"),
     draft_m: str = Form(""),
     work_start: str = Form(""),
     work_end: str = Form(""),
@@ -782,7 +800,6 @@ def operation_create(
         Operation(
             portcall_id=portcall_id,
             kind=operation_kind,
-            seq=_parse_form_int(seq) or 1,
             draft_m=_parse_form_float(draft_m),
             work_start=_parse_form_dt(work_start),
             work_end=_parse_form_dt(work_end),
@@ -866,6 +883,3 @@ def operation_tug_create(
         link.escort = False
     db.commit()
     return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
-
-
-

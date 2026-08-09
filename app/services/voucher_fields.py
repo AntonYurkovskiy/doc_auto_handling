@@ -33,6 +33,7 @@ VOUCHER_FIELDS: tuple[VoucherFieldDef, ...] = (
     VoucherFieldDef("finished_work", "Окончание работ", "finished_dt"),
     VoucherFieldDef("remarks", "Примечания", "remarks"),
     VoucherFieldDef("joint_with_line_1", "Совместно с", "joint_with"),
+    VoucherFieldDef("joint_with_line_2", "Совместно с (строка 2)", "joint_with_line_2"),
 )
 
 
@@ -40,6 +41,8 @@ def field_value(voucher: Voucher, field: VoucherFieldDef) -> str | None:
     """Текущее значение поля ваучера в виде строки."""
     if field.attr == "tug_id":
         return voucher.tug.name if voucher.tug else None
+    if field.attr == "joint_with_line_2":
+        return None
     value = getattr(voucher, field.attr)
     if value is None:
         return None
