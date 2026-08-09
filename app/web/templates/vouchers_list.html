@@ -1,7 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Ваучеры</h1>
-<div class="actions"><a class="btn" href="/vouchers/new">+ Добавить вручную</a></div>
+<div class="actions">
+    <a class="btn" href="/vouchers/new">+ Добавить вручную</a>
+    <form action="/vouchers/upload" method="post" enctype="multipart/form-data" class="actions">
+        <input type="file" name="file" accept=".pdf,image/*" required style="width:auto">
+        <button class="btn secondary" type="submit">Загрузить скан</button>
+    </form>
+</div>
 <table>
     <tr>
         <th>#</th><th>№</th><th>Буксир</th><th>Судно</th><th>Вид работ</th>
