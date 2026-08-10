@@ -21,6 +21,12 @@ MANIFEST_COLUMNS = (
     "application_in_archive",
     "lookup_status",
 )
+SKIPPED_COLUMNS = (
+    "source_row_number",
+    "voucher_file",
+    "application_file",
+    "missing",
+)
 
 
 def _normalise_name(value: str | None) -> str:
@@ -78,13 +84,21 @@ def _write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def _write_skipped(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=SKIPPED_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _write_readme(path: Path, count: int) -> None:
     path.write_text(
         "Выборка для проверки doc_auto_handling\n\n"
-        f"Комплектов: {count}\n"
+        f"Полных комплектов: {count}\n"
         "Для каждого комплекта совпадают voucher_file и application_file "
         "из исторической выгрузки.\n"
-        "Исходные имена и пути указаны в manifest.csv.\n",
+        "Исходные имена и пути указаны в manifest.csv.\n"
+        "Пропущенные неполные пары указаны в skipped_missing.csv.\n",
         encoding="utf-8",
     )
 
@@ -120,12 +134,6 @@ def build_sample(
             raise ValueError(f"В CSV отсутствуют колонки: {', '.join(sorted(missing))}")
         rows = _unique_pairs(reader)
 
-    selected = rows[offset : offset + count]
-    if len(selected) < count:
-        raise ValueError(
-            f"В CSV доступно только {len(rows) - offset} комплектов после offset={offset}"
-        )
-
     voucher_index = _build_file_index(vouchers_dir)
     application_index = _build_file_index(applications_dir)
     staging = output_zip.with_name(f".{output_zip.stem}.staging")
@@ -137,9 +145,11 @@ def build_sample(
     (staging / "vouchers").mkdir()
     (staging / "applications").mkdir()
     manifest_rows: list[dict[str, str]] = []
-    missing_files: list[str] = []
+    skipped_rows: list[dict[str, str]] = []
     try:
-        for index, row in enumerate(selected, start=offset + 1):
+        for index, row in enumerate(rows[offset:], start=offset + 1):
+            if len(manifest_rows) >= count:
+                break
             voucher_name = _normalise_name(row["voucher_file"])
             application_name = _normalise_name(row["application_file"])
             voucher_source, voucher_ambiguous = _find_source(voucher_name, voucher_index)
@@ -147,10 +157,19 @@ def build_sample(
                 application_name, application_index
             )
             if voucher_source is None or application_source is None:
+                missing_names: list[str] = []
                 if voucher_source is None:
-                    missing_files.append(f"ваучер: {voucher_name}")
+                    missing_names.append(f"ваучер: {voucher_name}")
                 if application_source is None:
-                    missing_files.append(f"заявка: {application_name}")
+                    missing_names.append(f"заявка: {application_name}")
+                skipped_rows.append(
+                    {
+                        "source_row_number": str(index),
+                        "voucher_file": voucher_name,
+                        "application_file": application_name,
+                        "missing": "; ".join(missing_names),
+                    }
+                )
                 continue
 
             voucher_archive_name = _copy_with_unique_name(
@@ -177,12 +196,18 @@ def build_sample(
                 }
             )
 
-        if missing_files:
+        if len(manifest_rows) < count:
+            details = "\n  - " + "\n  - ".join(
+                row["missing"] for row in skipped_rows
+            )
             raise FileNotFoundError(
-                "Не найдены файлы:\n  - " + "\n  - ".join(missing_files)
+                f"Удалось собрать только {len(manifest_rows)} полных комплектов "
+                f"из требуемых {count}; пропущено пар: {len(skipped_rows)}"
+                f"{details}"
             )
 
         _write_manifest(staging / "manifest.csv", manifest_rows)
+        _write_skipped(staging / "skipped_missing.csv", skipped_rows)
         _write_readme(staging / "README.txt", len(manifest_rows))
         output_zip.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:

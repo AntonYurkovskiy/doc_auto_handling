@@ -51,11 +51,15 @@ def test_build_sample_deduplicates_vouchers_and_writes_manifest(tmp_path: Path) 
             "README.txt",
             "applications/application.pdf",
             "manifest.csv",
+            "skipped_missing.csv",
             "vouchers/243k.pdf",
         ]
         manifest = archive.read("manifest.csv").decode("utf-8")
         assert "243k.pdf" in manifest
         assert "application.pdf" in manifest
+        assert archive.read("skipped_missing.csv").decode("utf-8").splitlines() == [
+            "source_row_number,voucher_file,application_file,missing"
+        ]
 
 
 def test_build_sample_reports_missing_files(tmp_path: Path) -> None:
@@ -71,3 +75,34 @@ def test_build_sample_reports_missing_files(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="missing.pdf"):
         build_sample(csv_path, vouchers, applications, tmp_path / "sample.zip", count=1)
+
+
+def test_build_sample_skips_missing_rows_until_count_is_reached(tmp_path: Path) -> None:
+    csv_path = tmp_path / "history.csv"
+    vouchers = tmp_path / "vouchers"
+    applications = tmp_path / "applications"
+    vouchers.mkdir()
+    applications.mkdir()
+    (vouchers / "complete.pdf").write_bytes(b"voucher")
+    (applications / "complete.pdf").write_bytes(b"application")
+    _write_csv(
+        csv_path,
+        [
+            {
+                "voucher_file": "missing.pdf",
+                "application_file": "missing.pdf",
+                "vessel": "",
+            },
+            {
+                "voucher_file": "complete.pdf",
+                "application_file": "complete.pdf",
+                "vessel": "",
+            },
+        ],
+    )
+
+    output = tmp_path / "sample.zip"
+    assert build_sample(csv_path, vouchers, applications, output, count=1) == 1
+    with zipfile.ZipFile(output) as archive:
+        skipped = archive.read("skipped_missing.csv").decode("utf-8")
+        assert "missing.pdf" in skipped
