@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import imaplib
 import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -32,6 +33,7 @@ from app.models import (
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
+from app.services.html_sanitize import sanitize_email_html
 from app.services.imap_ingest import fetch_new_applications
 from app.services.matching import find_candidates
 from app.services.operations import (
@@ -40,9 +42,24 @@ from app.services.operations import (
     recommended_tug_count,
 )
 from app.services.vessels import ensure_vessel
+from app.services.voucher import predict_and_store
+from app.services.voucher_fields import (
+    VOUCHER_FIELDS,
+    confirm_fields,
+    predictions_by_field,
+)
+from app.services.voucher_files import (
+    media_type_for,
+    preview_kind,
+    resolve_stored_file,
+    store_upload,
+)
+from app.services.voucher_linking import link_voucher
+from app.services.voucher_template import ensure_default_template
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
+templates.env.filters["safe_email_html"] = sanitize_email_html
 
 app = FastAPI(title="Обработка заявок и ваучеров буксира")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "web" / "static")), name="static")
@@ -75,6 +92,10 @@ def _seed_reference() -> None:
         db.commit()
     finally:
         db.close()
+
+
+def _known_agents(db: Session) -> list[str]:
+    return [row.name for row in db.query(Agent).all()]
 
 
 def _parse_form_dt(value: str | None) -> datetime | None:
@@ -112,6 +133,60 @@ def _save_upload(file: UploadFile, folder: Path) -> str:
     with open(dest, "wb") as out:
         shutil.copyfileobj(file.file, out)
     return str(dest)
+
+
+@dataclass
+class VoucherFormData:
+    """Ручные поля карточки ваучера (одинаковы для «Сохранить» и «Подтвердить»)."""
+
+    number: str
+    tug_id: str
+    vessel_name: str
+    agent: str
+    work_type: str
+    left_base_dt: str
+    arrived_base_dt: str
+    started_dt: str
+    finished_dt: str
+    remarks: str
+    joint_with: str
+    is_ice: str
+    escort_hours: str
+    application_id: str
+
+
+def voucher_form_data(
+    number: str = Form(""),
+    tug_id: str = Form(""),
+    vessel_name: str = Form(""),
+    agent: str = Form(""),
+    work_type: str = Form(""),
+    left_base_dt: str = Form(""),
+    arrived_base_dt: str = Form(""),
+    started_dt: str = Form(""),
+    finished_dt: str = Form(""),
+    remarks: str = Form(""),
+    joint_with: str = Form(""),
+    is_ice: str = Form(""),
+    escort_hours: str = Form(""),
+    application_id: str = Form(""),
+) -> VoucherFormData:
+    return VoucherFormData(
+        number=number,
+        tug_id=tug_id,
+        vessel_name=vessel_name,
+        agent=agent,
+        work_type=work_type,
+        left_base_dt=left_base_dt,
+        arrived_base_dt=arrived_base_dt,
+        started_dt=started_dt,
+        finished_dt=finished_dt,
+        remarks=remarks,
+        joint_with=joint_with,
+        is_ice=is_ice,
+        escort_hours=escort_hours,
+        application_id=application_id,
+    )
 
 
 # --- Дашборд ----------------------------------------------------------------
@@ -168,7 +243,7 @@ async def application_upload(
     file: UploadFile = File(...), db: Session = Depends(get_db)
 ):
     path = _save_upload(file, settings.incoming_applications_dir)
-    parsed = parse_application(path)
+    parsed = parse_application(path, known_agents=_known_agents(db))
     app_row = Application(
         status=DocStatus.needs_review,
         source="upload",
@@ -186,8 +261,10 @@ async def application_upload(
         entry_datetime=parsed.entry_datetime,
         exit_datetime=parsed.exit_datetime,
         destination=parsed.destination,
+        agent=parsed.agent,
         tugs_text=parsed.tugs_text,
         raw_text=parsed.raw_text,
+        raw_html=parsed.raw_html,
         file_path=path,
     )
     db.add(app_row)
@@ -259,67 +336,143 @@ def vouchers_list(request: Request, db: Session = Depends(get_db)):
 def voucher_new(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         "voucher_form.html",
-        {"request": request, "item": None, "tugs": db.query(Tug).all(),
-         "agents": db.query(Agent).all()},
+        {
+            "request": request,
+            "item": None,
+            "tugs": db.query(Tug).all(),
+            "agents": db.query(Agent).all(),
+            "preview": "none",
+            "voucher_file_url": None,
+            "fields": [],
+            "applications": db.query(Application).order_by(Application.id.desc()).all(),
+        },
     )
 
 
 @app.post("/vouchers/upload")
 async def voucher_upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    # Ваучер — скан-картинка; OCR рукописных полей появится в Фазе 3/6.
-    # Пока сохраняем файл и открываем форму ручного ввода полей.
-    path = _save_upload(file, settings.incoming_vouchers_dir)
-    voucher = Voucher(status=DocStatus.needs_review, file_path=path)
+    stored = store_upload(
+        file.file, file.filename, file.content_type, settings.incoming_vouchers_dir
+    )
+    voucher = Voucher(
+        status=DocStatus.needs_review,
+        template=ensure_default_template(db),
+        file_path=str(stored.path),
+        original_filename=stored.original_filename,
+        content_type=stored.content_type,
+        sha256=stored.sha256,
+    )
     db.add(voucher)
-    db.commit()
+    db.flush()
+    predict_and_store(db, voucher)
     return RedirectResponse(f"/vouchers/{voucher.id}", status_code=303)
+
+
+def _apply_voucher_form(item: Voucher, form: VoucherFormData) -> None:
+    item.number = form.number or None
+    item.tug_id = int(form.tug_id) if form.tug_id.strip().isdigit() else None
+    item.vessel_name = form.vessel_name or None
+    item.agent = form.agent or None
+    item.work_type = form.work_type or None
+    item.left_base_dt = _parse_form_dt(form.left_base_dt)
+    item.arrived_base_dt = _parse_form_dt(form.arrived_base_dt)
+    item.started_dt = _parse_form_dt(form.started_dt)
+    item.finished_dt = _parse_form_dt(form.finished_dt)
+    item.remarks = form.remarks or None
+    item.joint_with = form.joint_with or None
+    item.is_ice = bool(form.is_ice)
+    item.escort_hours = _parse_form_float(form.escort_hours)
+    application_id = _parse_form_int(form.application_id)
+    item.application_id = application_id
 
 
 @app.post("/vouchers")
 def voucher_create(
     db: Session = Depends(get_db),
     voucher_id: str = Form(""),
-    number: str = Form(""),
-    tug_id: str = Form(""),
-    vessel_name: str = Form(""),
-    agent: str = Form(""),
-    work_type: str = Form(""),
-    left_base_dt: str = Form(""),
-    arrived_base_dt: str = Form(""),
-    started_dt: str = Form(""),
-    finished_dt: str = Form(""),
-    remarks: str = Form(""),
-    joint_with: str = Form(""),
-    is_ice: str = Form(""),
-    escort_hours: str = Form(""),
+    form: VoucherFormData = Depends(voucher_form_data),
 ):
     if voucher_id:
-        item = db.get(Voucher, int(voucher_id))
+        parsed_id = _parse_form_int(voucher_id)
+        item = db.get(Voucher, parsed_id) if parsed_id is not None else None
         if item is None:
             return RedirectResponse("/vouchers", status_code=303)
     else:
-        item = Voucher()
+        item = Voucher(status=DocStatus.needs_review)
         db.add(item)
 
-    item.number = number or None
-    item.tug_id = int(tug_id) if tug_id.strip().isdigit() else None
-    item.vessel_name = vessel_name or None
-    item.agent = agent or None
-    item.work_type = work_type or None
-    item.left_base_dt = _parse_form_dt(left_base_dt)
-    item.arrived_base_dt = _parse_form_dt(arrived_base_dt)
-    item.started_dt = _parse_form_dt(started_dt)
-    item.finished_dt = _parse_form_dt(finished_dt)
-    item.remarks = remarks or None
-    item.joint_with = joint_with or None
-    item.is_ice = bool(is_ice)
-    try:
-        item.escort_hours = float(escort_hours.replace(",", ".")) if escort_hours.strip() else None
-    except ValueError:
-        item.escort_hours = None
-    item.status = DocStatus.confirmed
+    _apply_voucher_form(item, form)
+    if item.application_id is not None and item.template_id is None:
+        item.template = ensure_default_template(db)
+    if item.application is not None:
+        predict_and_store(db, item, item.application)
+    # Ручное сохранение без подтверждения не завершает проверку ваучера.
+    if item.status in (DocStatus.new, DocStatus.needs_review):
+        item.status = DocStatus.needs_review
     db.commit()
     return RedirectResponse(f"/vouchers/{item.id}", status_code=303)
+
+
+@app.post("/vouchers/{voucher_id}/confirm")
+def voucher_confirm(
+    voucher_id: int,
+    db: Session = Depends(get_db),
+    form: VoucherFormData = Depends(voucher_form_data),
+):
+    item = db.get(Voucher, voucher_id)
+    if item is None:
+        return RedirectResponse("/vouchers", status_code=303)
+
+    _apply_voucher_form(item, form)
+    db.flush()
+    if item.template_id is None:
+        item.template = ensure_default_template(db)
+    if item.application is not None:
+        predict_and_store(db, item, item.application)
+    confirm_fields(db, item, datetime.utcnow())
+    link_voucher(db, item, item.application)
+    item.status = DocStatus.confirmed
+    item.reviewed_at = datetime.utcnow()
+    db.commit()
+    return RedirectResponse(f"/vouchers/{item.id}", status_code=303)
+
+
+def _voucher_file(item: Voucher) -> Path:
+    """Файл ваучера строго внутри каталога хранения (иначе 404)."""
+    if not item.file_path:
+        raise HTTPException(status_code=404, detail="У ваучера нет файла")
+    try:
+        return resolve_stored_file(
+            Path(item.file_path).name, settings.incoming_vouchers_dir
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/vouchers/{voucher_id}/file")
+def voucher_file(voucher_id: int, db: Session = Depends(get_db)):
+    item = db.get(Voucher, voucher_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Ваучер не найден")
+    path = _voucher_file(item)
+    return FileResponse(
+        path,
+        media_type=media_type_for(path, item.content_type),
+        filename=item.original_filename or path.name,
+        content_disposition_type="inline",
+    )
+
+
+@app.get("/files/vouchers/{filename:path}")
+def voucher_file_by_name(filename: str):
+    """Выдача файла по имени: только из settings.incoming_vouchers_dir."""
+    try:
+        path = resolve_stored_file(filename, settings.incoming_vouchers_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        path, media_type=media_type_for(path), content_disposition_type="inline"
+    )
 
 
 @app.get("/vouchers/{voucher_id}", response_class=HTMLResponse)
@@ -327,10 +480,33 @@ def voucher_detail(voucher_id: int, request: Request, db: Session = Depends(get_
     item = db.get(Voucher, voucher_id)
     if item is None:
         return RedirectResponse("/vouchers", status_code=303)
+
+    preview = "none"
+    file_url = None
+    if item.file_path:
+        try:
+            path = resolve_stored_file(
+                Path(item.file_path).name, settings.incoming_vouchers_dir
+            )
+        except ValueError:
+            path = None
+        if path is not None:
+            preview = preview_kind(path)
+            file_url = f"/vouchers/{item.id}/file"
+
+    predictions = predictions_by_field(item)
     return templates.TemplateResponse(
         "voucher_form.html",
-        {"request": request, "item": item, "tugs": db.query(Tug).all(),
-         "agents": db.query(Agent).all()},
+        {
+            "request": request,
+            "item": item,
+            "tugs": db.query(Tug).all(),
+            "agents": db.query(Agent).all(),
+            "preview": preview,
+            "voucher_file_url": file_url,
+            "fields": [(field, predictions.get(field.name)) for field in VOUCHER_FIELDS],
+            "applications": db.query(Application).order_by(Application.id.desc()).all(),
+        },
     )
 
 
@@ -606,7 +782,6 @@ def operation_create(
     portcall_id: int,
     db: Session = Depends(get_db),
     kind: str = Form("прочее"),
-    seq: str = Form("1"),
     draft_m: str = Form(""),
     work_start: str = Form(""),
     work_end: str = Form(""),
@@ -625,7 +800,6 @@ def operation_create(
         Operation(
             portcall_id=portcall_id,
             kind=operation_kind,
-            seq=_parse_form_int(seq) or 1,
             draft_m=_parse_form_float(draft_m),
             work_start=_parse_form_dt(work_start),
             work_end=_parse_form_dt(work_end),
@@ -709,6 +883,3 @@ def operation_tug_create(
         link.escort = False
     db.commit()
     return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
-
-
-

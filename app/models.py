@@ -9,7 +9,19 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    event,
+    func,
+    select,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -154,21 +166,65 @@ class Operation(Base):
         back_populates="operation", cascade="all, delete-orphan"
     )
 
+    @property
+    def participants(self) -> list[OperationTug]:
+        """Все фактические участники операции, включая сторонних подрядчиков."""
+        return list(self.tug_links)
+
+    @property
+    def own_participants(self) -> list[OperationTug]:
+        """Участники — буксиры нашей организации (только они тарифицируются)."""
+        return [link for link in self.tug_links if not link.is_external]
+
+    @property
+    def participants_total(self) -> int:
+        """Фактическое общее число участников операции (наши + сторонние)."""
+        return len(self.tug_links)
+
 
 class OperationTug(Base):
-    """Связь операции с назначенным буксиром."""
+    """Участник операции: буксир нашей организации либо сторонний подрядчик.
+
+    Историческое имя таблицы сохранено ради совместимости: раньше сущность
+    описывала только связь операции с нашим буксиром.
+    """
 
     __tablename__ = "operation_tugs"
     __table_args__ = (UniqueConstraint("operation_id", "tug_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     operation_id: Mapped[int] = mapped_column(ForeignKey("operations.id"), nullable=False)
-    tug_id: Mapped[int] = mapped_column(ForeignKey("tugs.id"), nullable=False)
+    tug_id: Mapped[int | None] = mapped_column(ForeignKey("tugs.id"), nullable=True)
+    is_external: Mapped[bool] = mapped_column(default=False)
+    display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    work_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    work_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     escort: Mapped[bool] = mapped_column(default=False)
+    voucher_id: Mapped[int | None] = mapped_column(ForeignKey("vouchers.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     operation: Mapped[Operation] = relationship(back_populates="tug_links")
-    tug: Mapped[Tug] = relationship()
+    tug: Mapped[Tug | None] = relationship()
+    voucher: Mapped[Voucher | None] = relationship()
+
+    @property
+    def name(self) -> str:
+        return self.display_name or (self.tug.name if self.tug else "—")
+
+
+# Псевдоним для нового доменного имени сущности.
+OperationParticipant = OperationTug
+
+
+@event.listens_for(Operation, "before_insert")
+def _assign_operation_seq(_mapper, connection, target: Operation) -> None:  # noqa: ANN001
+    """Автоматически нумеровать операции внутри судозахода (ручной seq не нужен)."""
+    if target.portcall_id is None:
+        return
+    max_seq = connection.scalar(
+        select(func.max(Operation.seq)).where(Operation.portcall_id == target.portcall_id)
+    )
+    target.seq = (max_seq or 0) + 1
 
 
 class Application(Base):
@@ -201,6 +257,7 @@ class Application(Base):
     tugs_text: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_html: Mapped[str | None] = mapped_column(Text, nullable=True)  # HTML-тело письма
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     portcall_id: Mapped[int | None] = mapped_column(ForeignKey("portcalls.id"), nullable=True)

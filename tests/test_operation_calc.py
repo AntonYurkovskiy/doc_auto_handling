@@ -11,7 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from app.config import TariffsGroupA
 from app.database import Base
 from app.models import Operation, OperationKind, OperationTug, PortCall, Tug, Vessel
-from app.services.operations import calculate_operation
+from app.services.calculation import ParticipantInput, calculate_participants
+from app.services.operations import calculate_operation, participants_total
 
 
 def _session():
@@ -26,6 +27,116 @@ def _fake_fx(currency: str, on: date) -> float:
 
 def _no_dayoff(on: date) -> bool:
     return False
+
+
+def _tariffs() -> TariffsGroupA:
+    return TariffsGroupA(
+        mooring_unmooring_gt_2000_above=2,
+        vessel_repositioning_gt_2000_above=120,
+    )
+
+
+def _participants_kwargs(kind: str) -> dict:
+    return {
+        "agent": "Транс-Агро",
+        "work_type": kind,
+        "fx_provider": _fake_fx,
+        "dayoff_provider": _no_dayoff,
+        "tariffs": _tariffs(),
+    }
+
+
+def test_mooring_divisor_counts_external_participant() -> None:
+    # 2 наших + 1 сторонний: делитель равен 3, тарифицируются только наши доли.
+    result = calculate_participants(
+        gross_tonnage=3000,
+        participants=[
+            ParticipantInput(name="Коммунар"),
+            ParticipantInput(name="Пионер"),
+            ParticipantInput(name="Подрядчик", is_external=True),
+        ],
+        started_dt=datetime(2024, 6, 1, 10, 0),
+        finished_dt=datetime(2024, 6, 1, 11, 0),
+        **_participants_kwargs("швартовка"),
+    )
+    assert "/ 3 букс." in result.calc_note
+    assert result.amount == 4000.0  # 2 x (3000 т x 2 / 3)
+
+
+def test_external_participant_is_not_charged() -> None:
+    own_only = calculate_participants(
+        gross_tonnage=3000,
+        participants=[ParticipantInput(name="Коммунар")],
+        started_dt=datetime(2024, 6, 1, 10, 0),
+        finished_dt=datetime(2024, 6, 1, 11, 0),
+        **_participants_kwargs("швартовка"),
+    )
+    with_external = calculate_participants(
+        gross_tonnage=3000,
+        participants=[
+            ParticipantInput(name="Коммунар"),
+            ParticipantInput(name="Подрядчик", is_external=True),
+        ],
+        started_dt=datetime(2024, 6, 1, 10, 0),
+        finished_dt=datetime(2024, 6, 1, 11, 0),
+        **_participants_kwargs("швартовка"),
+    )
+    assert own_only.amount == 6000.0        # 3000 т x 2 / 1
+    assert with_external.amount == 3000.0   # 1 наш x (3000 т x 2 / 2)
+
+
+def test_reshift_sums_own_tugs_by_their_own_times() -> None:
+    result = calculate_participants(
+        gross_tonnage=3000,
+        participants=[
+            ParticipantInput(
+                name="Коммунар",
+                work_start=datetime(2024, 6, 1, 10, 0),
+                work_end=datetime(2024, 6, 1, 11, 0),
+            ),
+            ParticipantInput(
+                name="Пионер",
+                work_start=datetime(2024, 6, 1, 10, 30),
+                work_end=datetime(2024, 6, 1, 12, 30),
+            ),
+        ],
+        **_participants_kwargs("перешвартовка"),
+    )
+    assert result.amount == 360.0  # 120 x 1ч + 120 x 2ч, без деления на N
+    assert "Коммунар" in result.calc_note
+    assert "Пионер" in result.calc_note
+
+
+def test_operation_seq_is_assigned_automatically() -> None:
+    db = _session()
+    portcall = PortCall()
+    db.add(portcall)
+    db.flush()
+    for kind in (OperationKind.mooring, OperationKind.reshift, OperationKind.unmooring):
+        db.add(Operation(portcall_id=portcall.id, kind=kind))
+        db.flush()
+    db.commit()
+    assert [operation.seq for operation in portcall.operations] == [1, 2, 3]
+
+
+def test_participants_total_includes_external() -> None:
+    db = _session()
+    op = _make(db, agent="Транс-Агро", grt=3000, kind=OperationKind.mooring, tugs=2)
+    db.add(
+        OperationTug(
+            operation_id=op.id,
+            is_external=True,
+            display_name="Сторонний подрядчик",
+        )
+    )
+    db.commit()
+    db.refresh(op)
+
+    assert participants_total(op) == 3
+    assert len(op.own_participants) == 2
+
+    result = calculate_operation(db, op, fx_provider=_fake_fx, dayoff_provider=_no_dayoff)
+    assert "/ 3 букс." in result.calc_note
 
 
 def _make(db, *, agent: str, grt: int, kind: OperationKind, tugs: int = 0) -> Operation:

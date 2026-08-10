@@ -5,12 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.services.calculation import CalcResult, DayOffProvider, FxProvider, calculate
+from app.services.calculation import (
+    CalcResult,
+    DayOffProvider,
+    FxProvider,
+    ParticipantInput,
+    calculate_participants,
+)
 
 if TYPE_CHECKING:
-    from app.models import Operation
+    from app.models import Operation, OperationTug
 
 
 def escort_likely(draft_m: float | None) -> bool:
@@ -29,6 +36,31 @@ def recommended_tug_count(loa_m: float | None) -> int | None:
     return 3
 
 
+def next_operation_seq(db: Session, portcall_id: int) -> int:
+    """Следующий порядковый номер операции внутри судозахода."""
+    from app.models import Operation
+
+    max_seq = db.scalar(
+        select(func.max(Operation.seq)).where(Operation.portcall_id == portcall_id)
+    )
+    return (max_seq or 0) + 1
+
+
+def participants_total(operation: Operation) -> int:
+    """Фактическое число участников операции, включая сторонних подрядчиков."""
+    return len(operation.tug_links)
+
+
+def _participant_input(link: OperationTug) -> ParticipantInput:
+    return ParticipantInput(
+        name=link.name,
+        is_external=bool(link.is_external),
+        work_start=link.work_start,
+        work_end=link.work_end,
+        escort=bool(link.escort),
+    )
+
+
 def calculate_operation(
     db: Session,
     operation: Operation,
@@ -39,7 +71,8 @@ def calculate_operation(
     """Рассчитать стоимость операции по её судозаходу/судну и сохранить результат.
 
     Источники параметров: агент — из судозахода; GRT — из судна; время — из
-    операции (иначе ETA/ETD судозахода); число буксиров — из назначенных связей.
+    участника, иначе из операции, иначе ETA/ETD судозахода; делитель — все
+    фактические участники, включая сторонних подрядчиков.
     Провайдеры курса/выходных можно подменить в тестах.
     """
     portcall = operation.portcall
@@ -47,7 +80,7 @@ def calculate_operation(
 
     started = operation.work_start or (portcall.eta if portcall else None)
     finished = operation.work_end or (portcall.etd if portcall else None)
-    tug_count = len(operation.tug_links) or 1
+    participants = [_participant_input(link) for link in operation.tug_links]
 
     kwargs: dict[str, FxProvider | DayOffProvider] = {}
     if fx_provider is not None:
@@ -55,14 +88,15 @@ def calculate_operation(
     if dayoff_provider is not None:
         kwargs["dayoff_provider"] = dayoff_provider
 
-    result = calculate(
+    result = calculate_participants(
         agent=(portcall.agent if portcall else None) or "",
         work_type=operation.kind.value,
         gross_tonnage=vessel.grt if vessel else None,
+        participants=participants,
+        participants_total=participants_total(operation) or 1,
         started_dt=started,
         finished_dt=finished,
         is_ice=bool(operation.is_ice),
-        tug_count=tug_count,
         **kwargs,  # type: ignore[arg-type]
     )
 

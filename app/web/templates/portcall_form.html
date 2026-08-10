@@ -51,7 +51,7 @@
             <td>
                 {% if operation.tug_links %}
                     {% for link in operation.tug_links %}
-                    {{ link.tug.name }}{% if link.escort %} (сопровождение){% endif %}{% if not loop.last %}, {% endif %}
+                    {{ link.name }}{% if link.escort %} (сопровождение){% endif %}{% if not loop.last %}, {% endif %}
                     {% endfor %}
                 {% else %}—{% endif %}
                 {% set recommended = recommended_tug_count(item.vessel.loa_m if item.vessel else none) %}
@@ -100,7 +100,6 @@
             <option value="{{ kind.value }}">{{ kind.value }}</option>
             {% endfor %}
         </select>
-        <label>Порядок</label><input name="seq" type="number" min="1" value="1">
         <label>Осадка, м</label><input name="draft_m">
         <label>Начало работ</label><input type="datetime-local" name="work_start">
         <label>Окончание работ</label><input type="datetime-local" name="work_end">

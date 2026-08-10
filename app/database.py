@@ -55,6 +55,7 @@ def _add_missing_columns() -> None:
             ("message_id", "VARCHAR(500)"),
             ("loa_m", "FLOAT"),
             ("draft_m", "FLOAT"),
+            ("raw_html", "TEXT"),
         ],
         "operations": [
             ("work_start", "DATETIME"),
@@ -66,6 +67,13 @@ def _add_missing_columns() -> None:
             ("revenue_rub", "FLOAT"),
             ("calc_note", "TEXT"),
             ("calculated_at", "DATETIME"),
+        ],
+        "operation_tugs": [
+            ("is_external", "BOOLEAN DEFAULT 0"),
+            ("display_name", "VARCHAR(200)"),
+            ("work_start", "DATETIME"),
+            ("work_end", "DATETIME"),
+            ("voucher_id", "INTEGER"),
         ],
         "vouchers": [
             ("original_filename", "VARCHAR(255)"),
@@ -88,6 +96,33 @@ def _add_missing_columns() -> None:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {ddl_type}'))
 
 
+def _relax_operation_tug_id() -> None:
+    """Сделать operation_tugs.tug_id NULL-able: у сторонних участников буксира нет.
+
+    SQLite не умеет ALTER COLUMN, поэтому таблица пересоздаётся с переносом данных.
+    """
+    inspector = inspect(engine)
+    if "operation_tugs" not in set(inspector.get_table_names()):
+        return
+    columns = inspector.get_columns("operation_tugs")
+    tug_id = next((col for col in columns if col["name"] == "tug_id"), None)
+    if tug_id is None or tug_id["nullable"]:
+        return
+    names = [col["name"] for col in columns if col["name"] != "id"]
+    column_list = ", ".join(names)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE operation_tugs RENAME TO operation_tugs_old"))
+    Base.metadata.tables["operation_tugs"].create(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO operation_tugs (id, {column_list}) "
+                f"SELECT id, {column_list} FROM operation_tugs_old"
+            )
+        )
+        conn.execute(text("DROP TABLE operation_tugs_old"))
+
+
 def init_db() -> None:
     """Создать таблицы, применить лёгкую миграцию и заполнить справочники."""
     from app import models  # noqa: F401  (регистрация моделей)
@@ -95,5 +130,6 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    _relax_operation_tug_id()
     with SessionLocal() as db:
         ensure_default_template(db)
