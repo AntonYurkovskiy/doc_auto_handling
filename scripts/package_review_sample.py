@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import shutil
 import sys
 import zipfile
 from collections.abc import Iterable
+from email.header import decode_header
+from email.parser import BytesParser
 from pathlib import Path
 
 REQUIRED_COLUMNS = {"voucher_file", "application_file"}
@@ -33,11 +36,53 @@ def _normalise_name(value: str | None) -> str:
     return (value or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
 
 
+def _normalise_subject(value: str | None) -> str:
+    subject = (value or "").casefold().replace("_", " ")
+    subject = re.sub(r"\.(pdf|eml)$", "", subject)
+    subject = re.sub(r"^(?:re|fw|fwd)\s*[:_ -]+\s*", "", subject)
+    return " ".join(subject.split())
+
+
+def _decode_subject(value: str | None) -> str:
+    if not value:
+        return ""
+    parts = []
+    for part, encoding in decode_header(value):
+        if isinstance(part, bytes):
+            parts.append(part.decode(encoding or "utf-8", errors="replace"))
+        else:
+            parts.append(part)
+    return "".join(parts)
+
+
 def _build_file_index(root: Path) -> dict[str, list[Path]]:
     index: dict[str, list[Path]] = {}
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         index.setdefault(path.name.casefold(), []).append(path)
     return index
+
+
+def _build_subject_index(root: Path) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        try:
+            message = BytesParser().parsebytes(path.read_bytes())
+            subject = _normalise_subject(_decode_subject(message.get("subject")))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if subject:
+            index.setdefault(subject, []).append(path)
+    return index
+
+
+def _find_source_by_subject(
+    value: str,
+    index: dict[str, list[Path]],
+) -> tuple[Path | None, bool]:
+    matches = index.get(_normalise_subject(value), [])
+    if not matches:
+        return None, False
+    return matches[0], len(matches) > 1
 
 
 def _find_source(
@@ -48,6 +93,33 @@ def _find_source(
     if not matches:
         return None, False
     return matches[0], len(matches) > 1
+
+
+def _build_relative_file_index(root: Path) -> dict[str, list[Path]]:
+    index: dict[str, list[Path]] = {}
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = str(path.relative_to(root)).replace("\\", "/").casefold()
+        index.setdefault(relative, []).append(path)
+    return index
+
+
+def _find_source_by_path(
+    value: str | None,
+    root: Path,
+    relative_index: dict[str, list[Path]],
+) -> Path | None:
+    if not value:
+        return None
+    normalised = value.replace("\\", "/").strip("/")
+    marker = f"/{root.name.casefold()}/"
+    lowered = f"/{normalised.casefold()}"
+    marker_position = lowered.rfind(marker)
+    if marker_position >= 0:
+        relative = normalised[marker_position + len(marker) :]
+        matches = relative_index.get(relative.casefold(), [])
+        if matches:
+            return matches[0]
+    return None
 
 
 def _unique_pairs(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
@@ -136,6 +208,8 @@ def build_sample(
 
     voucher_index = _build_file_index(vouchers_dir)
     application_index = _build_file_index(applications_dir)
+    application_subject_index = _build_subject_index(applications_dir)
+    application_relative_index = _build_relative_file_index(applications_dir)
     staging = output_zip.with_name(f".{output_zip.stem}.staging")
     if staging.exists():
         raise FileExistsError(f"Временный каталог уже существует: {staging}")
@@ -156,6 +230,21 @@ def build_sample(
             application_source, application_ambiguous = _find_source(
                 application_name, application_index
             )
+            application_by_subject, subject_ambiguous = _find_source_by_subject(
+                application_name,
+                application_subject_index,
+            )
+            application_by_email_path = _find_source_by_path(
+                row.get("email_path"),
+                applications_dir,
+                application_relative_index,
+            )
+            if application_by_subject is not None and not subject_ambiguous:
+                application_source = application_by_subject
+                application_ambiguous = False
+            elif application_by_email_path is not None:
+                application_source = application_by_email_path
+                application_ambiguous = False
             if voucher_source is None or application_source is None:
                 missing_names: list[str] = []
                 if voucher_source is None:
@@ -183,6 +272,10 @@ def build_sample(
                 statuses.append("несколько_ваучеров_выбран_первый")
             if application_ambiguous:
                 statuses.append("несколько_заявок_выбрана_первая")
+            if application_by_subject is not None:
+                statuses.append("заявка_найдена_по_теме")
+            elif application_by_email_path is not None:
+                statuses.append("заявка_найдена_по_email_path")
             manifest_rows.append(
                 {
                     "source_row_number": str(index),
