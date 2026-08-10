@@ -274,7 +274,7 @@ def build_sample(
                     vouchers_dir,
                     voucher_index,
                 )
-                if voucher_source is None:
+                if voucher_source is None and not row.get("base_year"):
                     voucher_source, voucher_ambiguous = _find_source(
                         voucher_name, voucher_index
                     )
