@@ -221,3 +221,26 @@ def test_build_sample_uses_base_year_when_voucher_path_is_empty(tmp_path: Path) 
         assert "ваучер_найден_по_base_year" in archive.read("manifest.csv").decode(
             "utf-8"
         )
+
+
+def test_build_sample_does_not_cross_year_fallback(tmp_path: Path) -> None:
+    csv_path = tmp_path / "history.csv"
+    vouchers = tmp_path / "vouchers"
+    applications = tmp_path / "orders"
+    (vouchers / "2025").mkdir(parents=True)
+    applications.mkdir()
+    (vouchers / "2025" / "21k.pdf").write_bytes(b"voucher-2025")
+    (applications / "application.pdf").write_bytes(b"application")
+    _write_csv(
+        csv_path,
+        [
+            {
+                "voucher_file": "21k.pdf",
+                "application_file": "application.pdf",
+                "base_year": "2026",
+            }
+        ],
+    )
+
+    with pytest.raises(FileNotFoundError, match="21k.pdf"):
+        build_sample(csv_path, vouchers, applications, tmp_path / "sample.zip", count=1)
