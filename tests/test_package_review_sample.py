@@ -14,7 +14,14 @@ def _write_csv(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
         file,
-        fieldnames=["voucher_file", "application_file", "vessel", "email_path"],
+        fieldnames=[
+            "voucher_file",
+            "application_file",
+            "vessel",
+            "base_year",
+            "voucher_scan_path",
+            "email_path",
+        ],
         )
         writer.writeheader()
         writer.writerows(rows)
@@ -138,3 +145,49 @@ def test_build_sample_uses_eml_subject_for_nameless_exports(tmp_path: Path) -> N
         manifest = archive.read("manifest.csv").decode("utf-8")
         assert "заявка_найдена_по_теме" in manifest
         assert archive.read("applications/NoName-24") == message.as_bytes()
+
+
+def test_build_sample_uses_source_paths_for_repeated_voucher_names(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "history.csv"
+    vouchers = tmp_path / "vouchers"
+    applications = tmp_path / "orders"
+    (vouchers / "2025").mkdir(parents=True)
+    (vouchers / "2026").mkdir()
+    applications.mkdir()
+    (applications / "2025").mkdir()
+    (applications / "2026").mkdir()
+    (vouchers / "2025" / "21k.pdf").write_bytes(b"voucher-2025")
+    (vouchers / "2026" / "21k.pdf").write_bytes(b"voucher-2026")
+    (applications / "2025" / "NoName-1").write_bytes(b"application-2025")
+    (applications / "2026" / "NoName-2").write_bytes(b"application-2026")
+    _write_csv(
+        csv_path,
+        [
+            {
+                "voucher_file": "21k.pdf",
+                "application_file": "2025.pdf",
+                "base_year": "2025",
+                "voucher_scan_path": r"E:\data\vouchers\2025\21k.pdf",
+                "email_path": r"E:\data\orders\2025\NoName-1",
+            },
+            {
+                "voucher_file": "21k.pdf",
+                "application_file": "2026.pdf",
+                "base_year": "2026",
+                "voucher_scan_path": r"E:\data\vouchers\2026\21k.pdf",
+                "email_path": r"E:\data\orders\2026\NoName-2",
+            },
+        ],
+    )
+
+    output = tmp_path / "sample.zip"
+    assert build_sample(csv_path, vouchers, applications, output, count=2) == 2
+    with zipfile.ZipFile(output) as archive:
+        assert archive.read("vouchers/21k.pdf") == b"voucher-2025"
+        assert archive.read("vouchers/21k_2.pdf") == b"voucher-2026"
+        assert archive.read("applications/NoName-1") == b"application-2025"
+        assert archive.read("applications/NoName-2") == b"application-2026"
+        manifest = archive.read("manifest.csv").decode("utf-8")
+        assert manifest.count("ваучер_найден_по_voucher_scan_path") == 2

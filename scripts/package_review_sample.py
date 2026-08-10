@@ -120,11 +120,18 @@ def _find_source_by_path(
     lowered = f"/{normalised.casefold()}"
     marker_position = lowered.rfind(marker)
     if marker_position >= 0:
-        relative = normalised[marker_position + len(marker) :]
+        relative = lowered[marker_position + len(marker) :]
         matches = relative_index.get(relative.casefold(), [])
         if matches:
             return matches[0]
     return None
+
+
+def _voucher_key(row: dict[str, str], voucher_name: str) -> str:
+    source_path = row.get("voucher_scan_path", "").strip()
+    if source_path:
+        return source_path.replace("\\", "/").casefold()
+    return f"{voucher_name.casefold()}|{row.get('base_year', '').strip()}"
 
 
 def _unique_pairs(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
@@ -135,7 +142,7 @@ def _unique_pairs(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
         application_file = _normalise_name(row.get("application_file"))
         if not voucher_file or not application_file:
             continue
-        key = voucher_file.casefold()
+        key = _voucher_key(row, voucher_file)
         if key in seen_vouchers:
             continue
         seen_vouchers.add(key)
@@ -212,6 +219,7 @@ def build_sample(
         rows = _unique_pairs(reader)
 
     voucher_index = _build_file_index(vouchers_dir)
+    voucher_relative_index = _build_relative_file_index(vouchers_dir)
     application_index = _build_file_index(applications_dir)
     application_subject_index = _build_subject_index(applications_dir)
     application_relative_index = _build_relative_file_index(applications_dir)
@@ -231,7 +239,18 @@ def build_sample(
                 break
             voucher_name = _normalise_name(row["voucher_file"])
             application_name = _normalise_name(row["application_file"])
-            voucher_source, voucher_ambiguous = _find_source(voucher_name, voucher_index)
+            voucher_by_path = _find_source_by_path(
+                row.get("voucher_scan_path"),
+                vouchers_dir,
+                voucher_relative_index,
+            )
+            if voucher_by_path is not None:
+                voucher_source = voucher_by_path
+                voucher_ambiguous = False
+            else:
+                voucher_source, voucher_ambiguous = _find_source(
+                    voucher_name, voucher_index
+                )
             application_source, application_ambiguous = _find_source(
                 application_name, application_index
             )
@@ -244,11 +263,11 @@ def build_sample(
                 applications_dir,
                 application_relative_index,
             )
-            if application_by_subject is not None and not subject_ambiguous:
-                application_source = application_by_subject
-                application_ambiguous = False
-            elif application_by_email_path is not None:
+            if application_by_email_path is not None:
                 application_source = application_by_email_path
+                application_ambiguous = False
+            elif application_by_subject is not None and not subject_ambiguous:
+                application_source = application_by_subject
                 application_ambiguous = False
             if voucher_source is None or application_source is None:
                 missing_names: list[str] = []
@@ -275,12 +294,14 @@ def build_sample(
             statuses = []
             if voucher_ambiguous:
                 statuses.append("несколько_ваучеров_выбран_первый")
+            if voucher_by_path is not None:
+                statuses.append("ваучер_найден_по_voucher_scan_path")
             if application_ambiguous:
                 statuses.append("несколько_заявок_выбрана_первая")
-            if application_by_subject is not None:
-                statuses.append("заявка_найдена_по_теме")
-            elif application_by_email_path is not None:
+            if application_by_email_path is not None:
                 statuses.append("заявка_найдена_по_email_path")
+            elif application_by_subject is not None:
+                statuses.append("заявка_найдена_по_теме")
             manifest_rows.append(
                 {
                     "source_row_number": str(index),
