@@ -1,0 +1,99 @@
+# Сборка архива для проверки ваучеров
+
+Скрипт `scripts/package_review_sample.py` собирает ZIP из связанных пар:
+
+- скан ваучера из колонки `voucher_file`;
+- файл заявки из колонки `application_file`;
+- `manifest.csv` с исходными именами и строками истории.
+
+Скрипт ищет документы рекурсивно внутри указанных каталогов и не изменяет
+исходные файлы.
+
+## 1. Обновить локальный клон
+
+Эти команды выполняются в каталоге локального репозитория. Если есть свои
+незакоммиченные изменения, сначала сохрани их отдельно; `git reset --hard`
+использовать не нужно.
+
+```bash
+git status
+git fetch origin
+git switch main
+git pull --ff-only origin main
+```
+
+Скрипт появится в локальном клоне после merge PR с этим изменением.
+
+## 2. Подготовить пути
+
+Нужны три пути:
+
+1. `reconciled_dataset.csv` — историческая выгрузка;
+2. каталог со сканами ваучеров;
+3. каталог с файлами заявок.
+
+Каталоги могут содержать вложенные папки. Имена файлов должны совпадать с
+именами из CSV; поиск выполняется по имени файла без учёта регистра.
+
+Важно: `analysis/reconciled_dataset.csv` не является частью Git-репозитория,
+поэтому его нужно передать скрипту из того места, где он хранится у тебя.
+Документы и CSV не нужно коммитить или добавлять в Git.
+
+## 3. Собрать архив
+
+### Linux/macOS
+
+```bash
+python3 scripts/package_review_sample.py \
+  --csv "/путь/к/reconciled_dataset.csv" \
+  --vouchers-dir "/путь/к/сканам/ваучеров" \
+  --applications-dir "/путь/к/файлам/заявок" \
+  --count 10 \
+  --output "$HOME/Desktop/voucher_review_sample_10.zip"
+```
+
+### Windows PowerShell
+
+```powershell
+py scripts\package_review_sample.py `
+  --csv "D:\doc_auto\reconciled_dataset.csv" `
+  --vouchers-dir "D:\doc_auto\vouchers" `
+  --applications-dir "D:\doc_auto\applications" `
+  --count 10 `
+  --output "$HOME\Desktop\voucher_review_sample_10.zip"
+```
+
+Для пяти комплектов замени `--count 10` на `--count 5`.
+
+Результат — один ZIP на рабочем столе. Внутри будут:
+
+```text
+README.txt
+manifest.csv
+vouchers/
+applications/
+```
+
+При повторной выборке можно использовать `--offset 10`, чтобы взять
+следующие десять уникальных ваучеров:
+
+```bash
+python3 scripts/package_review_sample.py \
+  --csv "/путь/к/reconciled_dataset.csv" \
+  --vouchers-dir "/путь/к/сканам/ваучеров" \
+  --applications-dir "/путь/к/файлам/заявок" \
+  --count 10 \
+  --offset 10 \
+  --output "$HOME/Desktop/voucher_review_sample_11_20.zip"
+```
+
+## 4. Если скрипт сообщает об ошибках
+
+- `CSV не найден` — проверь путь к выгрузке;
+- `Каталог ... не найден` — проверь путь к папке;
+- `Не найдены файлы` — скрипт перечислит конкретные отсутствующие документы;
+- `Файл уже существует` — укажи другое имя через `--output`.
+
+Не переименовывай документы для обхода ошибки: по именам из отчёта можно
+понять, какие заявки или сканы отсутствуют. После успешной сборки прикрепи
+полученный ZIP в чат.
