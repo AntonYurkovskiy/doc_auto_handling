@@ -118,14 +118,14 @@ def test_build_sample_uses_eml_subject_for_nameless_exports(tmp_path: Path) -> N
     (applications / "2025").mkdir()
     (vouchers / "243k.pdf").write_bytes(b"voucher")
     message = EmailMessage()
-    message["Subject"] = "Вход VESSEL 20.07"
+    message["Subject"] = "Вход тн VESSEL 20.07 в 15:00 / ТСС №9"
     (applications / "2025" / "NoName-24").write_bytes(message.as_bytes())
     _write_csv(
         csv_path,
         [
             {
                 "voucher_file": "243k.pdf",
-                "application_file": "Вход VESSEL 20.07.pdf",
+                "application_file": "Вход тн VESSEL 20.07 в 1500 ТСС №9.pdf",
                 "vessel": "VESSEL",
                 "email_path": "",
             }

@@ -37,9 +37,14 @@ def _normalise_name(value: str | None) -> str:
 
 
 def _normalise_subject(value: str | None) -> str:
-    subject = (value or "").casefold().replace("_", " ")
+    subject = (value or "").casefold().replace("ё", "е")
+    subject = subject.replace("_", " ")
     subject = re.sub(r"\.(pdf|eml)$", "", subject)
-    subject = re.sub(r"^(?:re|fw|fwd)\s*[:_ -]+\s*", "", subject)
+    subject = re.sub(r"^(?:(?:re|fw|fwd)\s*[:_ -]+\s*)+", "", subject)
+    subject = re.sub(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", r"\1 \2", subject)
+    subject = re.sub(r"\b([01]\d|2[0-3])([0-5]\d)\b", r"\1 \2", subject)
+    subject = re.sub(r"[/\\|]+", " ", subject)
+    subject = re.sub(r"[^\w№.-]+", " ", subject, flags=re.UNICODE)
     return " ".join(subject.split())
 
 
