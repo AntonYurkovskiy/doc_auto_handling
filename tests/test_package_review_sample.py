@@ -191,3 +191,33 @@ def test_build_sample_uses_source_paths_for_repeated_voucher_names(
         assert archive.read("applications/NoName-2") == b"application-2026"
         manifest = archive.read("manifest.csv").decode("utf-8")
         assert manifest.count("ваучер_найден_по_voucher_scan_path") == 2
+
+
+def test_build_sample_uses_base_year_when_voucher_path_is_empty(tmp_path: Path) -> None:
+    csv_path = tmp_path / "history.csv"
+    vouchers = tmp_path / "vouchers"
+    applications = tmp_path / "orders"
+    (vouchers / "2025").mkdir(parents=True)
+    (vouchers / "2026").mkdir()
+    applications.mkdir()
+    (vouchers / "2025" / "21k.pdf").write_bytes(b"voucher-2025")
+    (vouchers / "2026" / "21k.pdf").write_bytes(b"voucher-2026")
+    (applications / "application.pdf").write_bytes(b"application")
+    _write_csv(
+        csv_path,
+        [
+            {
+                "voucher_file": "21k.pdf",
+                "application_file": "application.pdf",
+                "base_year": "2026",
+            }
+        ],
+    )
+
+    output = tmp_path / "sample.zip"
+    assert build_sample(csv_path, vouchers, applications, output, count=1) == 1
+    with zipfile.ZipFile(output) as archive:
+        assert archive.read("vouchers/21k.pdf") == b"voucher-2026"
+        assert "ваучер_найден_по_base_year" in archive.read("manifest.csv").decode(
+            "utf-8"
+        )

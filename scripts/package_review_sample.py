@@ -100,6 +100,25 @@ def _find_source(
     return matches[0], len(matches) > 1
 
 
+def _find_source_by_year(
+    filename: str,
+    year: str | None,
+    root: Path,
+    index: dict[str, list[Path]],
+) -> tuple[Path | None, bool]:
+    if not year:
+        return None, False
+    matches = index.get(_normalise_name(filename).casefold(), [])
+    year_matches = [
+        path
+        for path in matches
+        if year.casefold() in {part.casefold() for part in path.relative_to(root).parts}
+    ]
+    if not year_matches:
+        return None, False
+    return year_matches[0], len(year_matches) > 1
+
+
 def _build_relative_file_index(root: Path) -> dict[str, list[Path]]:
     index: dict[str, list[Path]] = {}
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
@@ -244,13 +263,23 @@ def build_sample(
                 vouchers_dir,
                 voucher_relative_index,
             )
+            voucher_by_year = False
             if voucher_by_path is not None:
                 voucher_source = voucher_by_path
                 voucher_ambiguous = False
             else:
-                voucher_source, voucher_ambiguous = _find_source(
-                    voucher_name, voucher_index
+                voucher_source, voucher_ambiguous = _find_source_by_year(
+                    voucher_name,
+                    row.get("base_year"),
+                    vouchers_dir,
+                    voucher_index,
                 )
+                if voucher_source is None:
+                    voucher_source, voucher_ambiguous = _find_source(
+                        voucher_name, voucher_index
+                    )
+                else:
+                    voucher_by_year = True
             application_source, application_ambiguous = _find_source(
                 application_name, application_index
             )
@@ -296,6 +325,8 @@ def build_sample(
                 statuses.append("несколько_ваучеров_выбран_первый")
             if voucher_by_path is not None:
                 statuses.append("ваучер_найден_по_voucher_scan_path")
+            elif voucher_by_year:
+                statuses.append("ваучер_найден_по_base_year")
             if application_ambiguous:
                 statuses.append("несколько_заявок_выбрана_первая")
             if application_by_email_path is not None:
