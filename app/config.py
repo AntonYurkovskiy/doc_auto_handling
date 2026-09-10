@@ -38,7 +38,14 @@ class Settings(BaseSettings):
     imap_ssl: bool = True
     imap_user: str = ""
     imap_password: str = ""
+
+    # Папка IMAP для заявок (пусто = fallback на imap_folder, затем INBOX).
+    imap_application_folder: str = ""
+    # Папка IMAP для ваучеров/сканов. Оставьте пустой, чтобы не забирать ваучеры по почте.
+    imap_voucher_folder: str = ""
+    # Устаревшее имя папки; используется как fallback для заявок.
     imap_folder: str = "INBOX"
+
     # Фильтр отправителя (необязательно): если пусто — берём все непрочитанные письма.
     application_sender: str = ""
 
@@ -86,6 +93,7 @@ def agent_group(agent: str | None) -> str:
     if agent in GROUP_B_AGENTS:
         return "B"
     return "C"
+
 
 # Соответствие терминов заявки -> нормализованный вид работ.
 # заявка «вход» == швартовка; «выход»/«перешвартовка (не ТСС_)» == отшвартовка;

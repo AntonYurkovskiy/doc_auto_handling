@@ -10,8 +10,8 @@ from sqlalchemy.orm import sessionmaker
 
 from app.config import Settings
 from app.database import Base
-from app.models import Application, Direction
-from app.services.imap_ingest import fetch_new_applications, ingest_messages
+from app.models import Application, Direction, Voucher
+from app.services.imap_ingest import fetch_new_applications, fetch_new_vouchers, ingest_messages
 
 
 def _session():
@@ -132,3 +132,23 @@ def test_fetch_new_applications_with_fake_connection(tmp_path: Path):
     assert summary.created == 1
     assert fake.stored == [b"1"]  # письмо помечено прочитанным
     assert db.query(Application).count() == 1
+
+
+def test_fetch_new_vouchers_with_fake_connection(tmp_path: Path):
+    db = _session()
+    cfg = Settings(
+        imap_host="imap.yandex.ru",
+        imap_user="user@yandex.ru",
+        imap_password="app-password",
+        imap_voucher_folder="ВАУЧЕРЫ",
+        incoming_applications_dir=tmp_path / "apps",
+        incoming_vouchers_dir=tmp_path / "vouchers",
+    )
+    fake = _FakeIMAP([_build_eml(with_pdf=True)])
+
+    summary = fetch_new_vouchers(db, settings=cfg, connection=fake)
+
+    assert summary.created == 1
+    assert summary.attachments_saved == 1
+    assert fake.stored == [b"1"]
+    assert db.query(Voucher).count() == 1

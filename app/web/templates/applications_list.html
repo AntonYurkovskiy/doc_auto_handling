@@ -5,6 +5,7 @@
 <div class="actions">
     <a class="btn" href="/applications/new">+ Добавить вручную</a>
     <form method="post" action="/mail/fetch" style="display:inline">
+        <input type="hidden" name="next" value="/applications">
         <button class="btn" type="submit">Получить почту (IMAP)</button>
     </form>
 </div>

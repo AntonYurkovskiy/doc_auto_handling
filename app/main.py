@@ -34,7 +34,7 @@ from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
 from app.services.html_sanitize import sanitize_email_html
-from app.services.imap_ingest import fetch_new_applications
+from app.services.imap_ingest import fetch_new_applications, fetch_new_vouchers
 from app.services.matching import find_candidates
 from app.services.operations import (
     calculate_operation,
@@ -213,16 +213,42 @@ def applications_list(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/mail/fetch", response_class=HTMLResponse)
-def mail_fetch(request: Request, db: Session = Depends(get_db)):
+def mail_fetch(
+    request: Request,
+    db: Session = Depends(get_db),
+    next: str = Form("/applications"),
+):
+    parts: list[str] = []
+
     try:
-        summary = fetch_new_applications(db)
-        mail_message = (
-            f"Приём почты: получено {summary.fetched}, "
-            f"создано {summary.created}, дублей {summary.skipped_duplicates}, "
-            f"вложений {summary.attachments_saved}."
+        app_summary = fetch_new_applications(db)
+        parts.append(
+            f"заявки: получено {app_summary.fetched}, "
+            f"создано {app_summary.created}, дублей {app_summary.skipped_duplicates}, "
+            f"ошибок {len(app_summary.errors)}"
         )
     except (RuntimeError, OSError, imaplib.IMAP4.error) as exc:
-        mail_message = f"Ошибка приёма почты: {exc}"
+        parts.append(f"ошибка заявок: {exc}")
+
+    try:
+        voucher_summary = fetch_new_vouchers(db)
+        parts.append(
+            f"ваучеры: получено {voucher_summary.fetched}, "
+            f"создано {voucher_summary.created}, дублей {voucher_summary.skipped_duplicates}, "
+            f"ошибок {len(voucher_summary.errors)}"
+        )
+    except (RuntimeError, OSError, imaplib.IMAP4.error) as exc:
+        parts.append(f"ошибка ваучеров: {exc}")
+
+    mail_message = "Приём почты: " + "; ".join(parts)
+
+    if next == "/vouchers":
+        items = db.query(Voucher).order_by(Voucher.id.desc()).all()
+        return templates.TemplateResponse(
+            "vouchers_list.html",
+            {"request": request, "items": items, "mail_message": mail_message},
+        )
+
     items = db.query(Application).order_by(Application.id.desc()).all()
     return templates.TemplateResponse(
         "applications_list.html",
@@ -239,9 +265,7 @@ def application_new(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/applications/upload")
-async def application_upload(
-    file: UploadFile = File(...), db: Session = Depends(get_db)
-):
+async def application_upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
     path = _save_upload(file, settings.incoming_applications_dir)
     parsed = parse_application(path, known_agents=_known_agents(db))
     app_row = Application(
@@ -250,7 +274,8 @@ async def application_upload(
         sender=parsed.sender,
         subject=parsed.subject,
         received_at=parsed.received_at,
-        direction=Direction(parsed.direction) if parsed.direction in Direction._value2member_map_
+        direction=Direction(parsed.direction)
+        if parsed.direction in Direction._value2member_map_
         else Direction.other,
         vessel_name=parsed.vessel_name,
         imo=parsed.imo,
@@ -442,9 +467,7 @@ def _voucher_file(item: Voucher) -> Path:
     if not item.file_path:
         raise HTTPException(status_code=404, detail="У ваучера нет файла")
     try:
-        return resolve_stored_file(
-            Path(item.file_path).name, settings.incoming_vouchers_dir
-        )
+        return resolve_stored_file(Path(item.file_path).name, settings.incoming_vouchers_dir)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -470,9 +493,7 @@ def voucher_file_by_name(filename: str):
         path = resolve_stored_file(filename, settings.incoming_vouchers_dir)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return FileResponse(
-        path, media_type=media_type_for(path), content_disposition_type="inline"
-    )
+    return FileResponse(path, media_type=media_type_for(path), content_disposition_type="inline")
 
 
 @app.get("/vouchers/{voucher_id}", response_class=HTMLResponse)
@@ -485,9 +506,7 @@ def voucher_detail(voucher_id: int, request: Request, db: Session = Depends(get_
     file_url = None
     if item.file_path:
         try:
-            path = resolve_stored_file(
-                Path(item.file_path).name, settings.incoming_vouchers_dir
-            )
+            path = resolve_stored_file(Path(item.file_path).name, settings.incoming_vouchers_dir)
         except ValueError:
             path = None
         if path is not None:
@@ -754,9 +773,7 @@ def portcall_detail(portcall_id: int, request: Request, db: Session = Depends(ge
         return RedirectResponse("/portcalls", status_code=303)
     total_amount = sum(op.amount for op in item.operations if op.amount is not None)
     total_revenue = sum(op.revenue_rub for op in item.operations if op.revenue_rub is not None)
-    currency = next(
-        (op.currency for op in item.operations if op.currency), settings.ue_currency
-    )
+    currency = next((op.currency for op in item.operations if op.currency), settings.ue_currency)
     return templates.TemplateResponse(
         "portcall_form.html",
         {
@@ -792,9 +809,7 @@ def operation_create(
     if portcall is None:
         return RedirectResponse("/portcalls", status_code=303)
     operation_kind = (
-        OperationKind(kind)
-        if kind in OperationKind._value2member_map_
-        else OperationKind.other
+        OperationKind(kind) if kind in OperationKind._value2member_map_ else OperationKind.other
     )
     db.add(
         Operation(
@@ -859,11 +874,7 @@ def operation_tug_create(
         return RedirectResponse(f"/portcalls/{operation.portcall_id}", status_code=303)
 
     wants_escort = bool(escort)
-    link = (
-        db.query(OperationTug)
-        .filter_by(operation_id=operation_id, tug_id=tug.id)
-        .first()
-    )
+    link = db.query(OperationTug).filter_by(operation_id=operation_id, tug_id=tug.id).first()
     if link is None:
         link = OperationTug(operation_id=operation_id, tug_id=tug.id)
         db.add(link)
