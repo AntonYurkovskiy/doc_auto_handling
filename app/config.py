@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # Фильтр отправителя (необязательно): если пусто — берём все непрочитанные письма.
     application_sender: str = ""
 
+    # Путь к исполняемому файлу Tesseract (необязательно).
+    # Если пусто — ищем tesseract в PATH.
+    tesseract_cmd: str = ""
+
 
 settings = Settings()
 

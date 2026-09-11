@@ -1,19 +1,19 @@
 """Подготовка предсказаний полей ваучера.
 
-Ваучеры приходят как скан-картинки фиксированного бланка, но свободный OCR здесь
-не выполняется. Сервис готовит приоры: для каждого поля бланка собирается малое
-множество кандидатов (из заявки, истории и регламента работы буксиров), из него
-выбирается наиболее вероятное значение и сохраняется как предсказание. Картинка
-позже уточняет выбор классификацией региона по этому же множеству.
+Ваучеры приходят как скан-картинки фиксированного бланка. Для каждого поля
+бланка собирается малое множество кандидатов (из заявки, истории и регламента
+работы буксиров). Если доступен OCR, по размеченным регионам шаблона
+распознаётся текст скана и используется как предсказание. В противном случае
+выбирается первый кандидат из приоров.
 
-Пока изображение не анализируется, поэтому source предсказаний — "prior", а
-confidence прозрачно равна 1 / (число кандидатов).
+source предсказаний — "ocr" (если удалось распознать регион) или "prior",
+confidence — уверенность OCR либо 1 / (число кандидатов).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -28,6 +28,7 @@ from app.models import (
     VoucherRegion,
 )
 from app.services.calculation import normalize_work_type
+from app.services.voucher_ocr import ocr_voucher_regions
 
 PRINTED_FIELDS: tuple[str, ...] = ("tugboat", "vessel", "agent", "work_type")
 DATETIME_FIELDS: tuple[str, ...] = (
@@ -56,6 +57,7 @@ MINUTE_STEP = 10
 DATETIME_FORMAT = "%Y-%m-%d %H:%M"
 
 PREDICTION_SOURCE_PRIOR = "prior"
+PREDICTION_SOURCE_OCR = "ocr"
 
 _TUG_KEYS: tuple[tuple[str, str], ...] = (("коммунар", "коммунар"), ("пионер", "пионер"))
 _NUMBER_RE = re.compile(r"\d+")
@@ -190,15 +192,57 @@ def normalize_prediction(field_name: str, value: str | None) -> str | None:
     raise ValueError(f"Неизвестное поле ваучера: {field_name}")
 
 
+def _ocr_predicted_value(field_name: str, raw_text: str | None) -> str | None:
+    """Постобработка OCR-текста под конкретное поле ваучера."""
+    if raw_text is None:
+        return None
+    text = " ".join(raw_text.split())
+    if not text:
+        return None
+
+    if field_name == "tugboat":
+        lowered = text.lower()
+        if "коммунар" in lowered:
+            return "БК Коммунар"
+        if "пионер" in lowered:
+            return "БК Пионер"
+        return text
+    if field_name == "voucher_number":
+        match = _NUMBER_RE.search(text)
+        return str(int(match.group())) if match else text
+    if field_name in DATETIME_FIELDS:
+        parsed = _parse_datetime(text)
+        return parsed.strftime(DATETIME_FORMAT) if parsed else text
+    return text
+
+
 def predict_fields(
     voucher: Voucher,
     application: Application | None,
     history: VoucherHistory,
+    ocr_values: Mapping[str, tuple[str | None, float | None]] | None = None,
 ) -> list[FieldPrediction]:
-    """Построить предсказания всех полей бланка без анализа изображения."""
+    """Построить предсказания всех полей бланка: OCR + приоры."""
+    ocr_values = ocr_values or {}
     predictions: list[FieldPrediction] = []
     for field_name in VOUCHER_FIELDS:
         candidates = candidate_values(field_name, application, history)
+        ocr_raw, ocr_conf = ocr_values.get(field_name, (None, None))
+        if ocr_raw:
+            ocr_value = _ocr_predicted_value(field_name, ocr_raw)
+            combined = _unique_list([ocr_value, *candidates])
+            predictions.append(
+                FieldPrediction(
+                    field_name=field_name,
+                    predicted_value=ocr_value,
+                    predicted_normalized_value=normalize_prediction(field_name, ocr_value),
+                    confidence=round(ocr_conf, 6) if ocr_conf is not None else None,
+                    candidates=tuple(combined),
+                    source=PREDICTION_SOURCE_OCR,
+                )
+            )
+            continue
+
         predicted = _preferred_value(field_name, voucher, application, candidates)
         predictions.append(
             FieldPrediction(
@@ -248,11 +292,16 @@ def predict_and_store(
     voucher: Voucher,
     application: Application | None = None,
     history: VoucherHistory | None = None,
+    ocr_values: Mapping[str, tuple[str | None, float | None]] | None = None,
 ) -> list[VoucherFieldPrediction]:
-    """Посчитать предсказания и сохранить их через переданную сессию."""
+    """Посчитать предсказания (OCR + приоры) и сохранить их через переданную сессию."""
     application = application or voucher.application
     history = history if history is not None else load_history(db)
-    return store_predictions(db, voucher, predict_fields(voucher, application, history))
+    if ocr_values is None:
+        ocr_values = ocr_voucher_regions(voucher)
+    return store_predictions(
+        db, voucher, predict_fields(voucher, application, history, ocr_values)
+    )
 
 
 def _preferred_value(

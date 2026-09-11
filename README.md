@@ -55,6 +55,24 @@ uvicorn app.main:app --reload
 - «Сопровождение» — часы вводятся вручную (авто-разбор примечаний ваучера — позже);
 - выручка в рублях = `сумма × курс ЦБ` на дату завершения работ (для рублёвых договоров курс = 1).
 
+## OCR ваучеров
+
+Распознавание сканов ваучеров реализовано через **Tesseract** + `pytesseract`.
+
+1. Установи Tesseract:
+   - **Windows**: скачай установщик с [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
+     (или `choco install tesseract`) и убедись, что `rus` и `eng` языковые пакеты выбраны.
+   - **Linux**: `sudo apt-get install tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng`
+   - **macOS**: `brew install tesseract tesseract-lang`
+2. Убедись, что `tesseract` доступен в `PATH`.
+3. (Опционально) Переопредели путь в `.env`:
+   ```
+   APP_TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+   ```
+
+OCR запускается при загрузке ваучера и подтверждении. Если Tesseract не найден,
+приложение продолжает работать на приорах (история + заявка).
+
 ## Приём заявок по IMAP
 Настрой доступ к почте через переменные окружения (`.env`, см. `.env.example`):
 `APP_IMAP_HOST` (по умолчанию `imap.yandex.ru`), `APP_IMAP_PORT`, `APP_IMAP_SSL`,
@@ -86,4 +104,5 @@ pytest
 - **Фаза 1 (готово):** каркас, БД, ручной ввод, парсер заявок, расчёт, экспорт.
 - **Фаза 2:** приём заявок по IMAP, авто-парсинг PDF заявок «Fwd_…».
 - **Фаза 3:** модель ваучера, фиксированные регионы и ручное подтверждение предсказаний.
+- **Фаза 4:** OCR сканов ваучеров по регионам шаблона (Tesseract).
 - **Фаза 6:** локальная vision-модель для рукописи, worker (RQ), PostgreSQL, интеграция с корп-программой.
