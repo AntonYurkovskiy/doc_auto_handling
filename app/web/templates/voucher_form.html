@@ -100,13 +100,16 @@
             <div class="full actions">
                 <button class="btn" type="submit">Сохранить</button>
                 {% if item %}
+                <button class="btn secondary" type="submit" formaction="/vouchers/{{ item.id }}/recognize">
+                    Распознать
+                </button>
                 <button class="btn secondary" type="submit" formaction="/vouchers/{{ item.id }}/confirm">
                     Подтвердить
                 </button>
                 {% endif %}
             </div>
         </form>
-        <p class="muted">«Сохранить» оставляет статус needs_review, «Подтвердить» фиксирует значения полей.</p>
+        <p class="muted">«Сохранить» оставляет статус needs_review, «Распознать» перезапускает OCR и вставляет значения, «Подтвердить» фиксирует значения полей.</p>
     </section>
 </div>
 

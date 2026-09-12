@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Application, Direction, Voucher
+from app.models import Application, Direction, Tug, Voucher, VoucherFieldPrediction
 from app.services.voucher import (
     PREDICTION_SOURCE_OCR,
     PREDICTION_SOURCE_PRIOR,
@@ -19,6 +19,7 @@ from app.services.voucher import (
     predict_and_store,
     predict_fields,
 )
+from app.services.voucher_fields import apply_predictions_to_voucher
 from app.services.voucher_ocr import (
     crop_region,
     load_voucher_image,
@@ -208,3 +209,30 @@ def test_predict_and_store_runs_ocr_and_saves_predictions(monkeypatch):
     assert by_name["vessel"].source == PREDICTION_SOURCE_OCR
     assert by_name["tugboat"].predicted_value == "БК Пионер"
     assert by_name["tugboat"].source == PREDICTION_SOURCE_OCR
+
+
+def test_apply_predictions_to_voucher_fills_fields():
+    db = _session()
+    template = ensure_default_template(db)
+    tug = Tug(name="БК Пионер", code="p")
+    db.add(tug)
+    db.commit()
+
+    voucher = Voucher(template=template)
+    db.add(voucher)
+    db.flush()
+    voucher.predictions = [
+        VoucherFieldPrediction(field_name="voucher_number", predicted_value="123"),
+        VoucherFieldPrediction(field_name="tugboat", predicted_value="БК Пионер"),
+        VoucherFieldPrediction(field_name="vessel", predicted_value="ARIES"),
+        VoucherFieldPrediction(field_name="started_work", predicted_value="2026-07-20 10:00"),
+    ]
+    db.commit()
+
+    apply_predictions_to_voucher(db, voucher)
+    db.commit()
+
+    assert voucher.number == "123"
+    assert voucher.tug_id == tug.id
+    assert voucher.vessel_name == "ARIES"
+    assert voucher.started_dt == datetime(2026, 7, 20, 10, 0)

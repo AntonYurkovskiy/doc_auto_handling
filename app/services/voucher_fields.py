@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Voucher, VoucherFieldPrediction, VoucherRegion
+from app.models import Tug, Voucher, VoucherFieldPrediction, VoucherRegion
 
 
 @dataclass(frozen=True)
@@ -84,3 +84,26 @@ def confirm_fields(db: Session, voucher: Voucher, confirmed_at: datetime) -> Non
             prediction.region_id = region_ids[field.name]
         prediction.confirmed_value = value
         prediction.confirmed_at = confirmed_at
+
+
+def apply_predictions_to_voucher(db: Session, voucher: Voucher) -> None:
+    """Заполнить поля ваучера из сохранённых предсказаний (OCR/приоров)."""
+    existing = predictions_by_field(voucher)
+    tug_ids_by_name = {t.name: t.id for t in db.scalars(select(Tug)).all()}
+    for field in VOUCHER_FIELDS:
+        prediction = existing.get(field.name)
+        if prediction is None or not prediction.predicted_value:
+            continue
+        value = prediction.predicted_value
+        if field.attr == "tug_id":
+            voucher.tug_id = tug_ids_by_name.get(value)
+        elif field.attr == "joint_with_line_2":
+            continue
+        elif field.attr.endswith("_dt"):
+            try:
+                parsed = datetime.strptime(value, "%Y-%m-%d %H:%M")
+                setattr(voucher, field.attr, parsed)
+            except ValueError:
+                pass
+        else:
+            setattr(voucher, field.attr, value or None)

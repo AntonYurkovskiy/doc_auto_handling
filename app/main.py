@@ -45,6 +45,7 @@ from app.services.vessels import ensure_vessel
 from app.services.voucher import predict_and_store
 from app.services.voucher_fields import (
     VOUCHER_FIELDS,
+    apply_predictions_to_voucher,
     confirm_fields,
     predictions_by_field,
 )
@@ -458,6 +459,21 @@ def voucher_confirm(
     link_voucher(db, item, item.application)
     item.status = DocStatus.confirmed
     item.reviewed_at = datetime.utcnow()
+    db.commit()
+    return RedirectResponse(f"/vouchers/{item.id}", status_code=303)
+
+
+@app.post("/vouchers/{voucher_id}/recognize")
+def voucher_recognize(voucher_id: int, db: Session = Depends(get_db)):
+    """Перезапустить OCR и вставить распознанные значения в форму ваучера."""
+    item = db.get(Voucher, voucher_id)
+    if item is None:
+        return RedirectResponse("/vouchers", status_code=303)
+
+    if item.template_id is None:
+        item.template = ensure_default_template(db)
+    predict_and_store(db, item)
+    apply_predictions_to_voucher(db, item)
     db.commit()
     return RedirectResponse(f"/vouchers/{item.id}", status_code=303)
 
