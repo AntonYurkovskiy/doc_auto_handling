@@ -30,6 +30,10 @@ optional: false
 
 ## Что сделать
 
+Уже есть `load_voucher_image` в `app/services/voucher_ocr.py` (pypdfium2, 300 dpi, RGB, без
+EXIF-поворота). Не дублируй логику: вынеси её в `app/ocr/io.py`, а в `voucher_ocr.py` оставь
+тонкую обёртку, чтобы старые тесты `tests/test_voucher_ocr.py` проходили.
+
 1. **`app/ocr/__init__.py` и `app/ocr/io.py`:**
    - `load_scan(path, *, dpi=200, page=0) -> np.ndarray` — серое `uint8`, форма HxW.
      - PDF рендерить через `pypdfium2`. Он уже стоит как зависимость `pdfplumber`,

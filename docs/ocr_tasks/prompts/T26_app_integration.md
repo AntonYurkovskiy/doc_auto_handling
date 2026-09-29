@@ -35,8 +35,12 @@ optional: false
 1. **Разберись, как сейчас устроено**: CONTEXT.md, раздел «Текущий OCR-код»,
    `app/services/voucher_ocr.py`, `app/services/voucher.py`, роуты `/vouchers/upload` и
    `/vouchers/{id}` в `app/main.py`. Прежде чем менять, запиши план правок в журнал.
-2. **`voucher_ocr.py`:**
-   - вызывать `app.ocr.pipeline.recognize_voucher`;
+2. **`voucher_ocr.py`** (сейчас: `ocr_voucher_regions` → TrOCR/Tesseract по строковым
+   регионам, см. CONTEXT.md):
+   - для 4 строк дат и `voucher_number` вызывать `app.ocr.pipeline.recognize_voucher`;
+   - печатные поля (буксир, судно, агент, вид работ) оставить на Tesseract, как сейчас;
+   - сохранить совместимость роута `POST /vouchers/{voucher_id}/recognize` и
+     `apply_predictions_to_voucher`;
    - собрать `RecognitionContext` из ваучера, заявки и истории номеров (буксир, год) из БД;
    - пару — по заявке, если у неё есть ваучер другого буксира.
    - TrOCR убрать из рабочего пути. Если он остаётся для сравнения — только за флагом
@@ -48,6 +52,8 @@ optional: false
    - `candidate_datetimes`, `DATE_WINDOW_DAYS`, `MINUTE_STEP` удалить или оставить только
      как запасной вариант, если распознавание недоступно (`no_models`). Выбери и обоснуй.
      Обнови `tests/test_voucher_prediction.py`: он импортирует эти константы;
+   - `predict_fields` уже принимает `ocr_values` и ставит `source="ocr"`; расширь этот путь
+     под top-k и уверенность записи, а не пиши параллельный;
    - `source` предсказания: `ocr` или `prior`;
    - `confidence` — вероятность выбранного значения поля;
    - подтверждённые оператором значения не перезаписывать, как и сейчас.

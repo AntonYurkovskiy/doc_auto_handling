@@ -28,7 +28,40 @@
 
 ## 2. Текущий OCR-код
 
-(заполняет T00: сигнатуры, вызовы, модель TrOCR, предобработка, куда пишутся результаты)
+Прочитано из ветки `ocr/local-sources` (коммит 1f04bba). T00 сверяет с рабочей копией.
+
+- `app/services/voucher_ocr.py`:
+  - `load_voucher_image(voucher, *, dpi=300) -> PIL.Image | None` — картинка или первая
+    страница PDF через `pypdfium2`, RGB;
+  - `crop_region(image, region: VoucherRegion) -> PIL.Image` — кроп по нормализованным
+    `center_x/center_y/width/height`, **строка целиком**;
+  - `ocr_image(image, lang="rus+eng") -> (text, conf)` — Tesseract (`pytesseract`),
+    контраст ×2; путь к бинарнику — `settings.tesseract_cmd`;
+  - `ocr_voucher_regions(voucher) -> {region.name: (text, conf)}` — для
+    `HANDWRITTEN_FIELDS` (4 строки дат) сначала TrOCR, при `None` — Tesseract; остальные
+    регионы — Tesseract.
+- `app/services/voucher_trocr.py`:
+  - модель `kazars24/trocr-base-handwritten-ru` (VisionEncoderDecoder), ленивая загрузка
+    с блокировкой, устройство cuda/cpu;
+  - `trocr_image(image) -> (text, conf)`, conf — средняя max-вероятность токена;
+  - процессор сжимает кроп строки в 384×384 — источник проблемы из плана.
+  - **Дефект:** читает `settings.trocr_enabled`, `trocr_model`, `trocr_device`,
+    `trocr_max_new_tokens`, а в `app/config.py` на ветке этих полей нет. Проверка
+    `settings.trocr_enabled` стоит вне `try` → `AttributeError` при распознавании
+    рукописных строк. Тесты это не ловят: `ocr_image`/`load_voucher_image` подменены.
+    Возможно, в рабочей копии `config.py` есть незакоммиченные поля — проверить в T00.
+- `app/services/voucher.py`: `predict_fields(..., ocr_values)` и
+  `predict_and_store(..., ocr_values=None)` — если `ocr_values` не передан, вызывает
+  `ocr_voucher_regions`. OCR-текст → `_ocr_predicted_value` (для дат — `_parse_datetime`),
+  `source="ocr"`, `confidence` — уверенность OCR, кандидаты = OCR + приоры.
+  Сетка `candidate_datetimes` осталась.
+- `app/services/voucher_fields.py`: `apply_predictions_to_voucher(db, voucher)` — переносит
+  предсказания в поля ваучера.
+- `app/main.py`: `POST /vouchers/{voucher_id}/recognize` — перезапуск OCR и заполнение формы.
+- Тесты: `tests/test_voucher_ocr.py` (Tesseract и TrOCR подменены).
+- Зависимости: в `requirements.txt` добавлен `pytesseract==0.3.13`; torch и transformers
+  там не перечислены — стоят в `.venv` вручную.
+- `data/historical/predict_ocr/ocr_regions.txt` в ветку не попал.
 
 ## 3. Данные
 

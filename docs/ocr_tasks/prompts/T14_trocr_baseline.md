@@ -29,9 +29,10 @@ optional: false
 
 ## Что сделать
 
-1. **Модель.** Возьми из `app/services/voucher_trocr.py` модель и способ загрузки, которые
-   использует приложение (см. CONTEXT.md). Код приложения не меняй — пиши обёртку
-   в `ocr_lab/baseline_trocr.py`.
+1. **Модель.** Та же, что в приложении: `kazars24/trocr-base-handwritten-ru` через
+   `TrOCRProcessor` + `VisionEncoderDecoderModel` (см. `app/services/voucher_trocr.py`).
+   `trocr_image` возвращает только top-1, поэтому для beam search пиши обёртку
+   в `ocr_lab/baseline_trocr.py` с тем же процессором. Код приложения не меняй.
 2. **Два варианта подготовки кропа:**
    - «как есть», то есть ресайз в квадрат, как сейчас в приложении;
    - «с полями»: дополнить кроп белым до квадрата с сохранением пропорций.
