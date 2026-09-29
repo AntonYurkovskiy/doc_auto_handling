@@ -1,7 +1,8 @@
 """OCR полей ваучера по размеченным регионам шаблона.
 
-Работает поверх Tesseract (pytesseract). Для PDF сначала рендерится первая
-страница через pypdfium2, затем по нормализованным координатам
+Печатные поля распознаются Tesseract (pytesseract), рукописные даты/времена —
+TrOCR (см. voucher_trocr) с откатом на Tesseract. Для PDF сначала рендерится
+первая страница через pypdfium2, затем по нормализованным координатам
 VoucherRegion вырезаются фрагменты и распознаются.
 
 Если двоичный файл Tesseract недоступен, сервис логирует предупреждение
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING
 from PIL import Image, ImageEnhance
 
 from app.config import settings
+from app.services.voucher_trocr import trocr_image
 
 try:
     import pytesseract
@@ -31,6 +33,11 @@ logger = logging.getLogger(__name__)
 OCR_LANG = "rus+eng"
 RENDER_DPI = 300
 _MIN_CONFIDENCE = 0.3
+
+#: Рукописные поля даты/времени — распознаются TrOCR, не Tesseract.
+HANDWRITTEN_FIELDS: frozenset[str] = frozenset(
+    {"left_base", "arrived_base", "started_work", "finished_work"}
+)
 
 
 def _configure_tesseract() -> None:
@@ -178,6 +185,11 @@ def ocr_voucher_regions(voucher: Voucher) -> dict[str, tuple[str | None, float |
     result: dict[str, tuple[str | None, float | None]] = {}
     for region in voucher.template.regions:
         cropped = crop_region(image, region)
-        text, confidence = ocr_image(cropped)
+        if region.name in HANDWRITTEN_FIELDS:
+            text, confidence = trocr_image(cropped)
+            if text is None:
+                text, confidence = ocr_image(cropped)
+        else:
+            text, confidence = ocr_image(cropped)
         result[region.name] = (text, confidence)
     return result
