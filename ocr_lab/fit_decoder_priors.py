@@ -23,9 +23,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
-import json
 import math
-import os
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -59,22 +57,13 @@ from app.ocr.decoder import (
     default_minute_probs,
     subfield,
 )
+from ocr_lab import paths
+from ocr_lab.predictions import read_predictions
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 LOG_P_CLIP = -30.0
 DEFAULT_GRID: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
 # Веса картинки не обнуляем: без них декодер перестаёт читать.
 IMAGE_WEIGHTS = ("day", "month", "hour", "minute")
-
-
-def work_dir() -> Path:
-    """Каталог производных артефактов: `ocr_lab.paths.WORK_DIR` или `OCR_WORK_DIR`."""
-    try:
-        from ocr_lab import paths  # type: ignore[attr-defined]
-
-        return Path(paths.WORK_DIR)
-    except (ImportError, AttributeError):
-        return Path(os.environ.get("OCR_WORK_DIR", str(REPO_ROOT / "data" / "ocr")))
 
 
 # ---------------------------------------------------------------------------
@@ -349,19 +338,11 @@ class Sample:
 
 
 def load_predictions(path: Path) -> dict[str, dict[str, list[tuple[int, float]]]]:
-    """Подполя из JSONL T13: `{scan_id: {подполе: [(значение, p), …]}}`."""
-    out: dict[str, dict[str, list[tuple[int, float]]]] = {}
-    with path.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            item = json.loads(line)
-            fields = item.get("fields") or {}
-            out[str(item["scan_id"])] = {
-                name: [(int(v), float(p)) for v, p in dist] for name, dist in fields.items()
-            }
-    return out
+    """Подполя из JSONL T13 (`ocr_lab.predictions`): `{scan_id: {подполе: [(v, p), …]}}`."""
+    return {
+        pred.scan_id: {name: [(int(v), float(p)) for v, p in c] for name, c in pred.fields.items()}
+        for pred in read_predictions(path)
+    }
 
 
 def build_samples(
@@ -474,11 +455,10 @@ def _sha256(path: Path) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    wd = work_dir()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--manifest", type=Path, default=wd / "manifest.csv")
+    parser.add_argument("--manifest", type=Path, default=paths.MANIFEST)
     parser.add_argument("--pred", type=Path, default=None, help="val-предсказания T13 (JSONL)")
-    parser.add_argument("--out", type=Path, default=wd / "models" / "decoder_priors_v0.json")
+    parser.add_argument("--out", type=Path, default=paths.MODELS_DIR / "decoder_priors_v0.json")
     parser.add_argument("--val-split", default="val")
     parser.add_argument("--min-work-type", type=int, default=60)
     parser.add_argument("--grid", default=",".join(f"{v:g}" for v in DEFAULT_GRID))
