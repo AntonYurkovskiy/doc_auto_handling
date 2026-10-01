@@ -9,6 +9,8 @@
     python docs/ocr_tasks/run_task.py --status
     python docs/ocr_tasks/run_task.py T02 --dry-run
     python docs/ocr_tasks/run_task.py T02
+    python docs/ocr_tasks/run_task.py --all --dry-run          # очередь всех готовых задач
+    python docs/ocr_tasks/run_task.py --all                    # выполнить очередь последовательно
     python docs/ocr_tasks/run_task.py T03 --channel devin
     python docs/ocr_tasks/run_task.py T16 --effort xhigh
     python docs/ocr_tasks/run_task.py T06 --review
@@ -537,6 +539,89 @@ def run(plan: RunPlan, task: Task, *, keep_api_key: bool = False) -> int:
     return code
 
 
+def queue_candidates(
+    tasks: dict[str, Task], *, with_optional: bool, attempted: set[str]
+) -> list[Task]:
+    """Задачи очереди, которые можно запустить прямо сейчас, в порядке номеров.
+
+    Пропускаются: шаблон ревью R, облачные C*, уже готовые, уже пробованные в этом
+    прогоне (чтобы «частично» не зацикливалось), опциональные без --with-optional и
+    задачи с невыполненными зависимостями (включая ручные точки H1–H5).
+    """
+    statuses = task_statuses()
+    ready = []
+    for task in tasks.values():
+        if task.id == "R" or task.id.startswith("C") or task.host != "local":
+            continue
+        if statuses.get(task.id) == "готово" or task.id in attempted:
+            continue
+        if task.optional and not with_optional:
+            continue
+        if unmet_dependencies(task):
+            continue
+        ready.append(task)
+    return sorted(ready, key=lambda task: int(task.id[1:]))
+
+
+def waiting_report(tasks: dict[str, Task], *, with_optional: bool) -> list[str]:
+    """Чего ждут оставшиеся задачи: ручные точки и невыполненные зависимости."""
+    statuses = task_statuses()
+    lines = []
+    for task in tasks.values():
+        if task.id == "R" or task.id.startswith("C") or statuses.get(task.id) == "готово":
+            continue
+        if task.optional and not with_optional:
+            continue
+        unmet = unmet_dependencies(task)
+        if unmet:
+            lines.append(f"  {task.id}: ждёт {', '.join(unmet)}")
+    return lines
+
+
+def run_queue(tasks: dict[str, Task], args: argparse.Namespace) -> int:
+    """Выполнить все доступные задачи ПО ОДНОЙ, по мере выполнения зависимостей.
+
+    Последовательно, а не параллельно, намеренно: все задачи пишут в одну рабочую
+    копию и одну ветку (коммиты, PROGRESS.md, общий код), `git switch` им запрещён,
+    а GPU один (GTX 1050, 4 ГБ). Параллельные сессии дали бы гонки в git и конфликты.
+    Очередь останавливается на ручных точках H1–H5, на первой упавшей задаче и на
+    любом грязном дереве (проверка preflight перед следующей задачей).
+    """
+    attempted: set[str] = set()
+    done_now: list[str] = []
+    limit = args.max_tasks
+    available = ", ".join(
+        t.id for t in queue_candidates(tasks, with_optional=args.with_optional, attempted=attempted)
+    )
+    print(f"[queue] сейчас доступны: {available or '—'}")
+    while limit is None or len(done_now) < limit:
+        candidates = queue_candidates(tasks, with_optional=args.with_optional, attempted=attempted)
+        if not candidates:
+            break
+        task = candidates[0]
+        attempted.add(task.id)
+        print(f"\n[queue] ===== {task.id} {task.title} =====", flush=True)
+        code = run_single(task, args)
+        if code != 0:
+            print(f"[queue] {task.id} завершилась с кодом {code}: очередь остановлена")
+            return code
+        if args.dry_run:
+            # В dry-run статусы не меняются: показываем только то, что доступно сейчас.
+            done_now.append(f"{task.id}=dry-run")
+            continue
+        state = task_statuses().get(task.id)
+        done_now.append(f"{task.id}={state or 'нет записи в PROGRESS.md'}")
+        if state not in {"готово", "частично"}:
+            print(f"[queue] {task.id}: статус «{state}» в PROGRESS.md, очередь остановлена")
+            break
+    print("\n[queue] выполнено в этом прогоне: " + (", ".join(done_now) or "—"))
+    waiting = waiting_report(tasks, with_optional=args.with_optional)
+    if waiting:
+        print("[queue] остальное ждёт:")
+        print("\n".join(waiting))
+    return 0
+
+
 def summarize(path: Path) -> None:
     summary = StreamSummary(echo=False)
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -570,31 +655,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--allow-credits", action="store_true", help="разрешить Fable")
     parser.add_argument("--keep-api-key", action="store_true")
+    parser.add_argument(
+        "--all",
+        dest="all_tasks",
+        action="store_true",
+        help="очередь: последовательно выполнить все задачи, чьи зависимости выполнены",
+    )
+    parser.add_argument("--with-optional", action="store_true", help="в очереди и опциональные")
+    parser.add_argument("--max-tasks", type=int, help="остановить очередь после N задач")
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(errors="replace")
-    args = parse_args(sys.argv[1:] if argv is None else argv)
-    tasks = load_tasks()
-    if args.summarize:
-        summarize(args.summarize)
-        return 0
-    if args.export_json:
-        print(json.dumps([asdict(task) for task in tasks.values()], ensure_ascii=False, indent=2))
-        return 0
-    if args.status or not args.task:
-        print_status(tasks)
-        return 0
-    task = tasks.get(args.task.upper())
-    if task is None:
-        raise SystemExit(f"Нет задачи {args.task}. Список: --status")
-    if args.cloud_prompt:
-        prompt = CLOUD_PROMPT.format(id=task.id, path=task.path)
-        print(prompt)
-        print(f'\nЗапуск из терминала: claude --cloud "{prompt}"')
-        return 0
+def run_single(task: Task, args: argparse.Namespace) -> int:
     plan = build_plan(task, args)
     problems = preflight(task, plan, args)
     print(f"[plan] {task.id} {task.title}")
@@ -609,6 +681,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.fix and plan.effort == "max" and plan.channel == "claude":
         print(f"[i] следующая ступень после max — {ESCALATION_AFTER_MAX}")
     return run(plan, task, keep_api_key=args.keep_api_key)
+
+
+def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    tasks = load_tasks()
+    if args.summarize:
+        summarize(args.summarize)
+        return 0
+    if args.export_json:
+        print(json.dumps([asdict(task) for task in tasks.values()], ensure_ascii=False, indent=2))
+        return 0
+    if args.all_tasks:
+        if args.task:
+            raise SystemExit("--all запускает очередь целиком: id задачи не указывают")
+        if args.review or args.fix:
+            raise SystemExit("--all несовместимо с --review/--fix: ревью делается по задаче")
+        return run_queue(tasks, args)
+    if args.status or not args.task:
+        print_status(tasks)
+        return 0
+    task = tasks.get(args.task.upper())
+    if task is None:
+        raise SystemExit(f"Нет задачи {args.task}. Список: --status")
+    if args.cloud_prompt:
+        prompt = CLOUD_PROMPT.format(id=task.id, path=task.path)
+        print(prompt)
+        print(f'\nЗапуск из терминала: claude --cloud "{prompt}"')
+        return 0
+    if args.all_tasks:
+        raise SystemExit("--all запускает очередь целиком: id задачи не указывают")
+    return run_single(task, args)
 
 
 if __name__ == "__main__":
