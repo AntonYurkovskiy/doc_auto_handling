@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import json
 import os
 import re
@@ -632,7 +633,14 @@ def run_queue(tasks: dict[str, Task], args: argparse.Namespace) -> int:
         task = candidates[0]
         attempted.add(task.id)
         print(f"\n[queue] ===== {task.id} {task.title} =====", flush=True)
-        code = run_single(task, args)
+        task_args = args
+        if args.channel == "devin" and task.channel == "claude_only":
+            # В очереди --channel devin значит «Devin там, где разрешено»: картинки и
+            # машина пользователя (claude_only) идут на Claude, а не роняют очередь.
+            task_args = copy.copy(args)
+            task_args.channel = "claude"
+            print(f"[queue] {task.id}: claude_only, эта задача идёт на Claude")
+        code = run_single(task, task_args)
         if code != 0:
             print(f"[queue] {task.id} завершилась с кодом {code}: очередь остановлена")
             return code
