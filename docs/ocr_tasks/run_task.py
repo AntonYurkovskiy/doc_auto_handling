@@ -67,6 +67,10 @@ DISALLOWED_TOOLS = ",".join(
         "Bash(rm -rf *)",
     ]
 )
+# В `devin -p` режимы auto/accept-edits отклоняют любую команду оболочки (pytest, git commit),
+# smart на этой установке недоступен, поэтому остаётся dangerous. Защита от последствий:
+# хук pre-push (по OCR_NO_PUSH=1) и резервная ветка перед запуском (см. run()).
+DEVIN_PERMISSION_MODE = "dangerous"
 # Цепочка эскалации в Claude Code: сначала effort, потом модель (§ 8.3).
 ESCALATION = {
     ("claude-sonnet-5", "low"): ("claude-sonnet-5", "medium"),
@@ -354,7 +358,7 @@ def build_plan(task: Task, args: argparse.Namespace) -> RunPlan:
         command += ["--disallowedTools", DISALLOWED_TOOLS]
     else:
         # Модель Devin задаётся через config.json (devin_model_config), а не флагом --model.
-        command = [executable, "-p", prompt, "--permission-mode", "auto"]
+        command = [executable, "-p", prompt, "--permission-mode", DEVIN_PERMISSION_MODE]
     return RunPlan(channel, executable, command, prompt, model, effort, log_name)
 
 
@@ -531,6 +535,12 @@ def run(plan: RunPlan, task: Task, *, keep_api_key: bool = False) -> int:
     log_path = LOG_DIR / plan.log_name
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
+    if plan.channel == "devin":
+        # Хук .git/hooks/pre-push блокирует push, пока стоит эта переменная.
+        env["OCR_NO_PUSH"] = "1"
+        backup = f"ocr-backup/{task.id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        git("branch", backup)
+        print(f"[backup] ветка {backup} (откат: git reset --hard {backup})")
     if not keep_api_key:
         # ANTHROPIC_API_KEY в -p важнее подписки: сессия ушла бы в оплату по API (D-28).
         env.pop("ANTHROPIC_API_KEY", None)
