@@ -6,8 +6,13 @@
 распознаётся текст скана и используется как предсказание. В противном случае
 выбирается первый кандидат из приоров.
 
-source предсказаний — "ocr" (если удалось распознать регион) или "prior",
-confidence — уверенность OCR либо 1 / (число кандидатов).
+Приоритет источников: детерминированные значения (уже заполненные поля
+ваучера, имя файла — номер и буксир, судно из сопоставленной заявки) важнее
+OCR, OCR важнее приоров.
+
+source предсказаний — "filename" / "application" / "ocr" / "prior",
+confidence — уверенность OCR либо 1 / (число кандидатов); для
+детерминированных источников confidence = 1.0.
 """
 
 from __future__ import annotations
@@ -27,7 +32,8 @@ from app.models import (
     VoucherFieldPrediction,
     VoucherRegion,
 )
-from app.services.calculation import normalize_work_type
+from app.services.calculation import match_contract_services, normalize_work_type
+from app.services.voucher_number import voucher_filename_fields
 from app.services.voucher_ocr import ocr_voucher_regions
 
 PRINTED_FIELDS: tuple[str, ...] = ("tugboat", "vessel", "agent", "work_type")
@@ -58,8 +64,12 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M"
 
 PREDICTION_SOURCE_PRIOR = "prior"
 PREDICTION_SOURCE_OCR = "ocr"
+PREDICTION_SOURCE_FILENAME = "filename"
+PREDICTION_SOURCE_APPLICATION = "application"
 
 _TUG_KEYS: tuple[tuple[str, str], ...] = (("коммунар", "коммунар"), ("пионер", "пионер"))
+# Код буксира из имени файла -> канонический маркер имени и имя по умолчанию.
+_TUG_CODE_DEFAULT_NAMES: dict[str, str] = {"k": "БК Коммунар", "p": "БК Пионер"}
 _NUMBER_RE = re.compile(r"\d+")
 _DATETIME_INPUT_FORMATS: tuple[str, ...] = (
     "%Y-%m-%d %H:%M",
@@ -71,6 +81,13 @@ _DATETIME_INPUT_FORMATS: tuple[str, ...] = (
     "%d.%m.%Y",
     "%Y-%m-%d",
 )
+# Буквы, которые OCR рукописи путает с цифрами (поля даты/времени — только цифры).
+_DATETIME_HOMOGLYPHS = str.maketrans(
+    "ОоOoЗзБбЧчIiLl|SsВв",
+    "0000336644111115588",
+)
+_FLEX_DATE_RE = re.compile(r"(\d{1,2})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{2,4})")
+_FLEX_TIME_RE = re.compile(r"(\d{1,2})\s*[:;.,\- ]\s*(\d{2})")
 
 
 @dataclass(frozen=True)
@@ -210,10 +227,58 @@ def _ocr_predicted_value(field_name: str, raw_text: str | None) -> str | None:
     if field_name == "voucher_number":
         match = _NUMBER_RE.search(text)
         return str(int(match.group())) if match else text
+    if field_name == "work_type":
+        # Наименование услуги из договора, встретившееся в OCR-строке.
+        return match_contract_services(text) or text
     if field_name in DATETIME_FIELDS:
         parsed = _parse_datetime(text)
         return parsed.strftime(DATETIME_FORMAT) if parsed else text
     return text
+
+
+def _tug_name_by_code(code: str, history: VoucherHistory) -> str | None:
+    """Имя буксира по коду из имени файла: k — КОММУНАР, p — ПИОНЕР."""
+    marker = _TUG_CODE_DEFAULT_NAMES.get(code.lower())
+    if marker is None:
+        return None
+    marker_key = marker.split()[-1].lower()  # "коммунар" / "пионер"
+    for name in history.tug_names or DEFAULT_TUG_NAMES:
+        if marker_key in name.lower():
+            return name
+    return marker
+
+
+def _trusted_value(
+    field_name: str,
+    voucher: Voucher,
+    application: Application | None,
+    history: VoucherHistory,
+    file_number: int | None,
+    file_tug_code: str | None,
+) -> tuple[str, str] | None:
+    """Детерминированное значение поля: поле ваучера, имя файла, заявка.
+
+    Эти источники надёжнее OCR и проверяются до него. Возвращает
+    (значение, source) либо None, если детерминированного значения нет.
+    """
+    if field_name == "voucher_number":
+        if voucher.number:
+            return " ".join(voucher.number.split()), PREDICTION_SOURCE_PRIOR
+        if file_number is not None:
+            return str(file_number), PREDICTION_SOURCE_FILENAME
+    elif field_name == "tugboat":
+        if voucher.tug is not None:
+            return voucher.tug.name, PREDICTION_SOURCE_PRIOR
+        if file_tug_code:
+            name = _tug_name_by_code(file_tug_code, history)
+            if name is not None:
+                return name, PREDICTION_SOURCE_FILENAME
+    elif field_name == "vessel":
+        if voucher.vessel_name:
+            return " ".join(voucher.vessel_name.split()), PREDICTION_SOURCE_PRIOR
+        if application is not None and application.vessel_name:
+            return application.vessel_name, PREDICTION_SOURCE_APPLICATION
+    return None
 
 
 def predict_fields(
@@ -222,11 +287,30 @@ def predict_fields(
     history: VoucherHistory,
     ocr_values: Mapping[str, tuple[str | None, float | None]] | None = None,
 ) -> list[FieldPrediction]:
-    """Построить предсказания всех полей бланка: OCR + приоры."""
+    """Построить предсказания всех полей бланка: имя файла/заявка + OCR + приоры."""
     ocr_values = ocr_values or {}
+    file_number, file_tug_code = voucher_filename_fields(voucher)
     predictions: list[FieldPrediction] = []
     for field_name in VOUCHER_FIELDS:
         candidates = candidate_values(field_name, application, history)
+
+        trusted = _trusted_value(
+            field_name, voucher, application, history, file_number, file_tug_code
+        )
+        if trusted is not None:
+            value, source = trusted
+            predictions.append(
+                FieldPrediction(
+                    field_name=field_name,
+                    predicted_value=value,
+                    predicted_normalized_value=normalize_prediction(field_name, value),
+                    confidence=1.0,
+                    candidates=tuple(_unique_list([value, *candidates])),
+                    source=source,
+                )
+            )
+            continue
+
         ocr_raw, ocr_conf = ocr_values.get(field_name, (None, None))
         if ocr_raw:
             ocr_value = _ocr_predicted_value(field_name, ocr_raw)
@@ -368,12 +452,35 @@ def _regions_by_name(voucher: Voucher) -> dict[str, VoucherRegion]:
 
 
 def _parse_datetime(text: str) -> datetime | None:
+    """Разобрать дату/время: строгие форматы, затем свободный поиск по цифрам.
+
+    OCR рукописи (TrOCR) выдаёт строки вроде «2O.O7.2O26 O9-3О» — сначала
+    заменяем буквы-гомоглифы на цифры, потом пробуем строгие форматы и,
+    если не вышло, выдёргиваем дату и время регекспами.
+    """
+    cleaned = " ".join(text.translate(_DATETIME_HOMOGLYPHS).split())
     for fmt in _DATETIME_INPUT_FORMATS:
         try:
-            return datetime.strptime(text, fmt)
+            return datetime.strptime(cleaned, fmt)
         except ValueError:
             continue
-    return None
+
+    date_match = _FLEX_DATE_RE.search(cleaned)
+    if date_match is None:
+        return None
+    day, month, year = (int(group) for group in date_match.groups())
+    if year < 100:
+        year += 2000
+
+    hour = minute = 0
+    time_match = _FLEX_TIME_RE.search(cleaned, date_match.end())
+    if time_match is not None:
+        hour, minute = int(time_match.group(1)), int(time_match.group(2))
+
+    try:
+        return datetime(year, month, day, hour, minute)
+    except ValueError:
+        return None
 
 
 def _unique(values: Iterable[str | None]) -> tuple[str, ...]:

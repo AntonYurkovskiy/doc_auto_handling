@@ -73,6 +73,28 @@ uvicorn app.main:app --reload
 OCR запускается при загрузке ваучера и подтверждении. Если Tesseract не найден,
 приложение продолжает работать на приорах (история + заявка).
 
+Рукописные поля даты/времени («Выход из базы», «Приход в базу», «Начало работ»,
+«Окончание работ») распознаются **TrOCR** — моделью
+[`kazars24/trocr-base-handwritten-ru`](https://huggingface.co/kazars24/trocr-base-handwritten-ru)
+(transformers + torch, см. `requirements.txt`). При первом запуске веса
+скачиваются в кэш HuggingFace (~1.4 ГБ). Настройки в `.env`:
+
+```
+APP_TROCR_ENABLED=true       # false — сразу Tesseract для всех полей
+APP_TROCR_MODEL=kazars24/trocr-base-handwritten-ru
+APP_TROCR_DEVICE=            # пусто — авто (cuda при наличии), иначе cpu/cuda/mps
+APP_TROCR_MAX_NEW_TOKENS=32
+```
+
+Если TrOCR недоступен (нет torch/transformers или не скачались веса),
+рукописные поля откатываются на Tesseract, затем на приоры.
+
+Поле «Вид работ» после OCR нормализуется: в распознанной строке ищутся
+наименования услуг договора Транс-Агро (`CONTRACT_SERVICES` в `app/config.py`),
+при вхождении подставляется услуга из договора (несколько услуг — через « + »).
+Номер ваучера и буксир берутся из имени файла (`323p.pdf` → № 323, БК Пионер),
+судно — из сопоставленной заявки: эти источники приоритетнее OCR.
+
 ## Приём заявок по IMAP
 Настрой доступ к почте через переменные окружения (`.env`, см. `.env.example`):
 `APP_IMAP_HOST` (по умолчанию `imap.yandex.ru`), `APP_IMAP_PORT`, `APP_IMAP_SSL`,

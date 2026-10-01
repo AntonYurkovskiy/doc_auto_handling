@@ -9,14 +9,58 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models import Tug, Voucher
-from app.services.voucher_number import parse_voucher_number, predict_next
+from app.services.voucher_number import (
+    apply_filename_fields,
+    parse_voucher_number,
+    predict_next,
+    voucher_filename_fields,
+)
 
 
 def test_parse_voucher_number():
     assert parse_voucher_number("262k(2).pdf") == (262, "k")
     assert parse_voucher_number("100p.pdf") == (100, "p")
     assert parse_voucher_number("123.pdf") == (123, None)
+    assert parse_voucher_number("323p") == (323, "p")
+    assert parse_voucher_number("262k_2.pdf") == (262, "k")
     assert parse_voucher_number("garbage.pdf") == (None, None)
+
+
+def test_voucher_filename_fields_reads_original_and_stored_names():
+    assert voucher_filename_fields(Voucher(original_filename="323p.pdf")) == (323, "p")
+    assert voucher_filename_fields(Voucher(original_filename="14k.pdf")) == (14, "k")
+    # Сохранённое имя с sha-префиксом store_upload.
+    voucher = Voucher(file_path="E:/data/vouchers/82c16a358e69653b_14k.pdf")
+    assert voucher_filename_fields(voucher) == (14, "k")
+    # Санитизированное имя «ваучер 262k(2).pdf» -> «262k_2.pdf».
+    assert voucher_filename_fields(Voucher(original_filename="262k_2.pdf")) == (262, "k")
+    assert voucher_filename_fields(Voucher(original_filename="scan.pdf")) == (None, None)
+    assert voucher_filename_fields(Voucher()) == (None, None)
+
+
+def test_apply_filename_fields_sets_number_and_tug():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+
+    with session_factory() as db:
+        tug_k = Tug(name="БК Коммунар", code="k")
+        tug_p = Tug(name="БК Пионер", code="p")
+        db.add_all([tug_k, tug_p])
+        db.flush()
+
+        voucher = Voucher(original_filename="323p.pdf")
+        apply_filename_fields(db, voucher)
+        assert voucher.number == "323"
+        assert voucher.tug_id == tug_p.id
+
+        # Не затирает уже заполненные поля.
+        voucher2 = Voucher(
+            original_filename="14k.pdf", number="100", tug_id=tug_p.id
+        )
+        apply_filename_fields(db, voucher2)
+        assert voucher2.number == "100"
+        assert voucher2.tug_id == tug_p.id
 
 
 def test_predict_next_is_independent_by_tug_and_year():

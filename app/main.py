@@ -56,6 +56,7 @@ from app.services.voucher_files import (
     store_upload,
 )
 from app.services.voucher_linking import link_voucher
+from app.services.voucher_number import apply_filename_fields
 from app.services.voucher_template import ensure_default_template
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -390,6 +391,7 @@ async def voucher_upload(file: UploadFile = File(...), db: Session = Depends(get
     )
     db.add(voucher)
     db.flush()
+    apply_filename_fields(db, voucher)
     predict_and_store(db, voucher)
     return RedirectResponse(f"/vouchers/{voucher.id}", status_code=303)
 

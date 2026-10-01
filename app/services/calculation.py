@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from app.config import (
+    CONTRACT_SERVICES,
     WORK_TYPE_ALIASES,
     TariffsGroupA,
     agent_group,
@@ -33,16 +34,45 @@ class CalcResult:
 
 
 def normalize_work_type(raw: str | None) -> str | None:
-    """Привести вид работ из документа к нормализованному ключу тарифа."""
+    """Привести вид работ из документа к нормализованному ключу тарифа.
+
+    Алиасы ищутся по границам слова: «швартовка» не должна совпадать
+    внутри «отшвартовка»/«перешвартовка».
+    """
     if not raw:
         return None
-    text = raw.strip().lower()
+    text = " ".join(raw.strip().lower().split())
     if text in WORK_TYPE_ALIASES:
         return WORK_TYPE_ALIASES[text]
     for alias, canonical in WORK_TYPE_ALIASES.items():
-        if alias in text:
+        if re.search(rf"\b{re.escape(alias)}\b", text):
             return canonical
     return text
+
+
+def match_contract_services(text: str | None) -> str | None:
+    """Найти наименования услуг договора (Транс-Агро) в произвольной строке.
+
+    Каждая услуга ищется по regex-игле с границей слова; при вхождении
+    возвращается наименование услуги из договора. Несколько услуг в одной
+    строке склеиваются через « + » в порядке их появления в тексте
+    («Отшвартовка + Сопровождение»). Ничего не найдено — None.
+    """
+    if not text:
+        return None
+    found: list[tuple[int, int, str]] = []
+    for pattern, service in CONTRACT_SERVICES:
+        match = re.search(rf"\b(?:{pattern})\b", text, re.IGNORECASE)
+        if match is None:
+            continue
+        # Совпадение, уже покрытое более специфичной услугой, пропускаем.
+        if any(start <= match.start() and match.end() <= end for start, end, _ in found):
+            continue
+        found.append((match.start(), match.end(), service))
+    if not found:
+        return None
+    found.sort()
+    return " + ".join(dict.fromkeys(service for _, _, service in found))
 
 
 def tug_count_from_joint(joint_with: str | None) -> int:

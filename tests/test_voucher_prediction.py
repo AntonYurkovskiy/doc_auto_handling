@@ -14,6 +14,7 @@ from app.services.voucher import (
     DATE_WINDOW_DAYS,
     DEFAULT_TUG_NAMES,
     MINUTE_STEP,
+    PREDICTION_SOURCE_APPLICATION,
     VOUCHER_FIELDS,
     VoucherHistory,
     candidate_values,
@@ -99,16 +100,20 @@ def test_predict_fields_uses_prior_source_and_transparent_confidence():
     predictions = {p.field_name: p for p in predict_fields(voucher, _application(), history)}
 
     assert set(predictions) == set(VOUCHER_FIELDS)
-    assert all(p.source == "prior" for p in predictions.values())
+    assert all(
+        p.source == "prior" for name, p in predictions.items() if name != "vessel"
+    )
 
     tugboat = predictions["tugboat"]
     assert tugboat.predicted_value == "БК Коммунар"
     assert tugboat.predicted_normalized_value == "коммунар"
     assert tugboat.confidence == pytest.approx(0.5)
 
+    # Судно берётся из сопоставленной заявки и надёжнее OCR/приоров.
     vessel = predictions["vessel"]
     assert vessel.predicted_value == "MERIDIAN"
-    assert vessel.confidence == pytest.approx(0.5)
+    assert vessel.source == PREDICTION_SOURCE_APPLICATION
+    assert vessel.confidence == pytest.approx(1.0)
 
     assert predictions["remarks"].predicted_value is None
     assert predictions["remarks"].confidence is None

@@ -35,6 +35,7 @@ from app.services.application_parser import parse_eml
 from app.services.vessels import ensure_vessel
 from app.services.voucher import predict_and_store
 from app.services.voucher_files import ALLOWED_SUFFIXES, store_upload
+from app.services.voucher_number import apply_filename_fields
 from app.services.voucher_template import ensure_default_template
 
 _ATTACHMENT_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -280,6 +281,7 @@ def _ingest_voucher_message(
         )
         db.add(voucher)
         db.flush()
+        apply_filename_fields(db, voucher)
         predict_and_store(db, voucher)
         summary.created += 1
         summary.attachments_saved += 1

@@ -10,7 +10,9 @@ from app.config import TariffsGroupA
 from app.services.calculation import (
     calculate,
     format_hm,
+    match_contract_services,
     minutes_between,
+    normalize_work_type,
     tug_count_from_joint,
 )
 
@@ -222,6 +224,35 @@ def test_barge_towing_alias_and_unknown_generic_towing() -> None:
             finished_dt=datetime(2026, 7, 20, 11, 0),
             tariffs=_tariffs(),
         )
+
+
+def test_normalize_work_type_uses_word_boundaries() -> None:
+    # «швартовка» не должна совпадать внутри «отшвартовка»/«перешвартовка».
+    assert normalize_work_type("Отшвартовка судна") == "отшвартовка"
+    assert normalize_work_type("Отшвартовка + Сопровождение") == "отшвартовка"
+    assert normalize_work_type("Перешвартовка судна") == "перестановка"
+    assert normalize_work_type("Швартовка судна") == "швартовка"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("Отшвартовка судна", "Отшвартовка"),
+        ("Отшвартовка + Сопровождение", "Отшвартовка + Сопровождение"),
+        ("Сопровождение + Швартовка", "Сопровождение + Швартовка"),
+        ("Обслуживание морских сооружений", "Обслуживание морских сооружений"),
+        ("Услуги по обслуживанию судна", "Обслуживание судна"),
+        ("Буксировка баржи по каналу", "Буксировка баржи"),
+        ("Проводка каравана", "Сопровождение"),
+        ("околка льда", "Околка льда"),
+        ("Перешвартовка", "Перестановка"),
+        ("Перестановка", "Перестановка"),
+        ("шум без услуг", None),
+        (None, None),
+    ],
+)
+def test_match_contract_services(raw: str | None, expected: str | None) -> None:
+    assert match_contract_services(raw) == expected
 
 
 def test_tug_count_from_joint() -> None:
