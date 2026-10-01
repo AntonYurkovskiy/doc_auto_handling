@@ -23,12 +23,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -350,7 +352,8 @@ def build_plan(task: Task, args: argparse.Namespace) -> RunPlan:
             command += ["--max-budget-usd", f"{budget:g}"]
         command += ["--disallowedTools", DISALLOWED_TOOLS]
     else:
-        command = [executable, "-p", prompt, "--model", model, "--permission-mode", "auto"]
+        # Модель Devin задаётся через config.json (devin_model_config), а не флагом --model.
+        command = [executable, "-p", prompt, "--permission-mode", "auto"]
     return RunPlan(channel, executable, command, prompt, model, effort, log_name)
 
 
@@ -498,6 +501,30 @@ def _window_usage(info: dict[str, Any] | None) -> str:
     return " ".join(parts)
 
 
+def devin_config_path() -> Path:
+    return Path(os.environ.get("APPDATA", str(Path.home()))) / "devin" / "config.json"
+
+
+@contextlib.contextmanager
+def devin_model_config(model: str) -> Iterator[None]:
+    """Временно выставить модель Devin в его config.json (`agent.model`).
+
+    `devin -p --model X` на этой машине отвечает «Unknown model» при любом X, а модель
+    из конфига работает, поэтому модель задачи пишем в конфиг и возвращаем исходный
+    файл байт в байт после запуска (в том числе при падении или Ctrl+C).
+    Конфиг общий с десктопным Devin: на время задачи его модель тоже будет другой.
+    """
+    path = devin_config_path()
+    original = path.read_bytes()
+    config = json.loads(original.decode("utf-8-sig"))
+    config.setdefault("agent", {})["model"] = model
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        yield
+    finally:
+        path.write_bytes(original)
+
+
 def run(plan: RunPlan, task: Task, *, keep_api_key: bool = False) -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / plan.log_name
@@ -509,7 +536,11 @@ def run(plan: RunPlan, task: Task, *, keep_api_key: bool = False) -> int:
     print(f"[run] {task.id} → {plan.channel} {plan.model} {plan.effort}".rstrip())
     print(f"[log] {log_path.relative_to(REPO_ROOT)}")
     summary = StreamSummary()
+    model_context = (
+        devin_model_config(plan.model) if plan.channel == "devin" else contextlib.nullcontext()
+    )
     with (
+        model_context,
         log_path.open("w", encoding="utf-8") as log,
         subprocess.Popen(
             plan.command,
