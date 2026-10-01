@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from PIL import Image, ImageEnhance
 
 from app.config import settings
+from app.ocr.io import load_scan_pil
 from app.services.voucher_trocr import trocr_image
 
 try:
@@ -48,35 +49,6 @@ def _configure_tesseract() -> None:
         pytesseract.pytesseract.tesseract_cmd = settings.tesseract_cmd
 
 
-def _load_image(path: Path) -> Image.Image:
-    """Открыть изображение и привести к RGB."""
-    image: Image.Image = Image.open(path)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    return image
-
-
-def _render_pdf_first_page(path: Path, dpi: int = RENDER_DPI) -> Image.Image:
-    """Отрендерить первую страницу PDF в PIL Image заданным DPI."""
-    import pypdfium2 as pdfium
-
-    scale = dpi / 72.0
-    pdf = pdfium.PdfDocument(str(path))
-    try:
-        page = pdf.get_page(0)
-        bitmap = page.render(scale=scale)
-        try:
-            pil_image = bitmap.to_pil()
-        finally:
-            bitmap.close()
-    finally:
-        pdf.close()
-
-    if pil_image.mode != "RGB":
-        pil_image = pil_image.convert("RGB")
-    return pil_image
-
-
 def load_voucher_image(voucher: Voucher, *, dpi: int = RENDER_DPI) -> Image.Image | None:
     """Загрузить картинку ваучера: изображение или первая страница PDF."""
     if not voucher.file_path:
@@ -87,9 +59,7 @@ def load_voucher_image(voucher: Voucher, *, dpi: int = RENDER_DPI) -> Image.Imag
         return None
 
     try:
-        if path.suffix.lower() == ".pdf":
-            return _render_pdf_first_page(path, dpi=dpi)
-        return _load_image(path)
+        return load_scan_pil(path, dpi=dpi, page=0)
     except Exception as exc:  # pragma: no cover
         logger.warning("Не удалось загрузить изображение ваучера %s: %s", path, exc)
         return None
