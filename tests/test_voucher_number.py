@@ -10,7 +10,9 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Tug, Voucher
 from app.services.voucher_number import (
+    VoucherName,
     apply_filename_fields,
+    parse_voucher_name,
     parse_voucher_number,
     predict_next,
     voucher_filename_fields,
@@ -108,3 +110,35 @@ def test_predict_next_is_independent_by_tug_and_year():
         assert predict_next(db, tug_k.id, 2025) == 1000
         assert predict_next(db, tug_p.id, 2026) == 701
         assert predict_next(db, tug_k.id, 2024) == 1
+
+
+def test_parse_voucher_number_homoglyphs_and_variants():
+    # Кириллические «к» и «р» вместо латинских.
+    assert parse_voucher_number("252к.pdf") == (252, "k")
+    assert parse_voucher_number("98р.pdf") == (98, "p")
+    # Удвоенный код буксира.
+    assert parse_voucher_number("397kk.pdf") == (397, "k")
+    assert parse_voucher_number("410pp.pdf") == (410, "p")
+    # Прочие коды: Лигер и «s».
+    assert parse_voucher_number("16l.pdf") == (16, "l")
+    assert parse_voucher_number("218s.pdf") == (218, "s")
+    # Хвосты после кода, ведущие нули, пробел перед расширением.
+    assert parse_voucher_number("188k_.pdf") == (188, "k")
+    assert parse_voucher_number("12p_кор.pdf") == (12, "p")
+    assert parse_voucher_number("223k .pdf") == (223, "k")
+    assert parse_voucher_number("013k.pdf") == (13, "k")
+    # Не ваучеры.
+    assert parse_voucher_number("Re_ Вход тх KERASIA S 18.05 в 09_00 _ ТСС №8.pdf") == (
+        None,
+        None,
+    )
+    assert parse_voucher_number("") == (None, None)
+
+
+def test_parse_voucher_name_duplicate_and_copy():
+    # «а» (кириллица или латиница) — задублированный номер: 12p, 12ap, 13p.
+    dup = parse_voucher_name("16аp.pdf")
+    assert dup == VoucherName(number=16, tug_code="p", duplicate=True, copy=None)
+    assert parse_voucher_name("22ak.pdf") == VoucherName(22, "k", True, None)
+    assert parse_voucher_name("262k(2).pdf") == VoucherName(262, "k", False, 2)
+    assert parse_voucher_name("16p.pdf") == VoucherName(16, "p", False, None)

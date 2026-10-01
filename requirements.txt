@@ -15,3 +15,5 @@ openpyxl==3.1.5
 python-dateutil==2.9.0.post0
 torch==2.5.1
 transformers==4.46.3
+numpy==2.4.6
+opencv-python-headless==5.0.0.93
