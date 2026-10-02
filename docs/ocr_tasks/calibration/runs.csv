@@ -1,0 +1,13 @@
+log,task,channel,start,wall_est_min,duration_min,segments,results,assistant_msgs,turns,tool_calls,cost_usd,outcome,models,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,five_hour_first,five_hour_last,seven_day_first,seven_day_last,api_retries,auth_failed,denials
+20261001-033250_T00_claude.jsonl,T00,claude,2026-10-01T03:32,0.0,0.0,1,1,1,1,0,0,success,,0,0,0,0,,,,,0,1,0
+20261001-034432_T00_claude.jsonl,T00,claude,2026-10-01T03:44,15.9,15.8,1,1,174,81,99,2.32,error_max_turns,claude-sonnet-5,160,34722,7533682,116890,0.57,0.67,0.17,0.17,0,0,1
+20261001-044910_T00_claude.jsonl,T00,claude,2026-10-01T04:49,12.3,12.2,1,1,154,90,89,2.36,ok,claude-sonnet-5,136,43379,7042008,130133,0.02,0.18,0.18,0.19,0,0,0
+20261001-050128_T02_claude.jsonl,T02,claude,2026-10-01T05:01,23.4,23.3,1,1,164,90,89,5.01,ok,claude-sonnet-5,164,124132,14161792,234415,0.18,0.54,0.19,0.21,0,0,0
+20261001-054520_T03_devin.jsonl,T03,devin,2026-10-01T05:45,0.1,,,,,,,,"devin: stream-json нет, статистики нет",,,,,,,,,,,,
+20261001-060710_T03_devin.jsonl,T03,devin,2026-10-01T06:07,6.0,,,,,,,,"devin: stream-json нет, статистики нет",,,,,,,,,,,,
+20261001-062823_T03_devin.jsonl,T03,devin,2026-10-01T06:28,626.9,,,,,,,,"devin: stream-json нет, статистики нет",,,,,,,,,,,,
+20261001-232731_T03_devin.jsonl,T03,devin,2026-10-01T23:27,8.1,,,,,,,,"devin: stream-json нет, статистики нет",,,,,,,,,,,,
+20261001-233638_T04_claude.jsonl,T04,claude,2026-10-01T23:36,174.4,174.4,1,1,260,178,177,8.22,ok,claude-opus-5-5,178,93319,18043579,342888,0.07,0.04,0.23,0.25,1,0,0
+20261002-042454_T07_claude.jsonl,T07,claude,2026-10-02T04:24,113.8,33.2,2,1,117,40,73,3.84,"ok, затем оборвано (58 сообщений после result)",claude-opus-5-5,46,72417,3461707,212069,0.08,0.24,0.26,0.28,0,0,0
+20261002-094318_T07_claude.jsonl,T07,claude,2026-10-02T09:43,67.8,,1,0,146,146,67,,"оборвано (нет result), 403 authentication_failed",,,,,,0.12,0.41,0.29,0.32,1,1,
+20261002-105716_T07_claude.jsonl,T07,claude,2026-10-02T10:57,83.0,83.0,1,1,117,58,57,3.29,ok,claude-opus-5-5,92,43131,5481306,166775,0.44,0.03,0.32,0.34,3,0,0
