@@ -25,12 +25,16 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import functools
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -71,6 +75,13 @@ DISALLOWED_TOOLS = ",".join(
 # smart на этой установке недоступен, поэтому остаётся dangerous. Защита от последствий:
 # хук pre-push (по OCR_NO_PUSH=1) и резервная ветка перед запуском (см. run()).
 DEVIN_PERMISSION_MODE = "dangerous"
+# Код выхода раннера, когда сторож остановил молчащую сессию.
+IDLE_TIMEOUT_CODE = 124
+# Сторож: сколько минут без единой строки вывода считать сессию зависшей (0 — выключен).
+DEFAULT_IDLE_TIMEOUT_MIN = 40.0
+# Повторы сессии при `authentication_failed` (403): сколько раз и пауза до первого повтора, сек.
+DEFAULT_AUTH_RETRIES = 2
+DEFAULT_AUTH_RETRY_DELAY_S = 120.0
 # Цепочка эскалации в Claude Code: сначала effort, потом модель (§ 8.3).
 ESCALATION = {
     ("claude-sonnet-5", "low"): ("claude-sonnet-5", "medium"),
@@ -270,6 +281,49 @@ def cli_version(executable: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.groups()) if match else None
 
 
+def _claude_candidates() -> list[str]:
+    """Все найденные `claude`: из PATH, встроенные сборки приложения, `~/.local/bin`.
+
+    Путь встроенной сборки меняется с обновлением приложения
+    (`%APPDATA%/Claude/claude-code/<версия>/[<хеш>/]claude.exe`), а в PATH часто
+    остаётся устаревший `claude`. `OCR_CLAUDE_BIN` задаёт путь вручную.
+    """
+    names = ("claude.exe", "claude")
+    found: list[str] = []
+    override = os.environ.get("OCR_CLAUDE_BIN")
+    if override and Path(override).exists():
+        found.append(override)
+    on_path = shutil.which("claude")
+    if on_path:
+        found.append(on_path)
+    roots = [Path.home() / ".local" / "bin"]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        app_root = Path(appdata) / "Claude" / "claude-code"
+        roots += [app_root, *sorted(app_root.glob("*")), *sorted(app_root.glob("*/*"))]
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate.is_file():
+                found.append(str(candidate))
+    unique: dict[str, str] = {}
+    for item in found:
+        unique.setdefault(os.path.normcase(str(Path(item).resolve())), item)
+    return list(unique.values())
+
+
+@functools.lru_cache(maxsize=1)
+def find_claude() -> str:
+    """Самый свежий `claude` по `--version`; при равенстве — ближе к началу списка."""
+    best = ""
+    best_version: tuple[int, ...] = ()
+    for candidate in _claude_candidates():
+        version = cli_version(candidate)
+        if version is not None and version > best_version:
+            best, best_version = candidate, version
+    return best or "claude"
+
+
 def git(*args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False
@@ -326,7 +380,7 @@ def build_plan(task: Task, args: argparse.Namespace) -> RunPlan:
     if not model:
         raise SystemExit(f"{task.id}: для канала {channel} в шапке не задана модель.")
 
-    executable = shutil.which(channel) or channel
+    executable = find_claude() if channel == "claude" else (shutil.which(channel) or channel)
     suffix = "_review" if args.review else "_fix" if args.fix else ""
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_name = f"{stamp}_{task.id}{suffix}_{channel}.jsonl"
@@ -386,8 +440,8 @@ def _budget(task: Task, args: argparse.Namespace) -> float | None:
 
 def preflight(task: Task, plan: RunPlan, args: argparse.Namespace) -> list[str]:
     problems: list[str] = []
-    if shutil.which(plan.channel) is None:
-        problems.append(f"не найден CLI `{plan.channel}` в PATH")
+    if shutil.which(plan.executable) is None:
+        problems.append(f"не найден CLI `{plan.channel}` (ни в PATH, ни среди сборок приложения)")
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     if branch in {"main", "master"} and not args.allow_main:
         problems.append(f"текущая ветка {branch}: создайте рабочую ветку или --allow-main")
@@ -401,7 +455,7 @@ def preflight(task: Task, plan: RunPlan, args: argparse.Namespace) -> list[str]:
         if plan.model.startswith(CREDIT_ONLY_PREFIXES) and not args.allow_credits:
             problems.append(f"{plan.model} на Pro оплачивается кредитами (--allow-credits)")
         required = MIN_CLI_FOR_MODEL.get(plan.model)
-        if required and shutil.which("claude"):
+        if required and shutil.which(plan.executable):
             version = cli_version(plan.executable)
             if version is None or version < required:
                 need = ".".join(map(str, required))
@@ -423,6 +477,7 @@ class StreamSummary:
         self.rate_limit: dict[str, Any] | None = None
         self.init: dict[str, Any] | None = None
         self.tool_calls = 0
+        self.auth_failed = False
 
     def feed(self, line: str) -> None:
         try:
@@ -435,6 +490,9 @@ class StreamSummary:
             self.init = event
             self._print(f"[init] model={event.get('model')} session={event.get('session_id')}")
         elif kind == "assistant":
+            if event.get("error") == "authentication_failed":
+                self.auth_failed = True
+                self._print("[auth] authentication_failed (403): сессия потеряла доступ к API")
             for block in event.get("message", {}).get("content", []):
                 self._assistant_block(block)
         elif kind == "result":
@@ -530,9 +588,126 @@ def devin_model_config(model: str) -> Iterator[None]:
         path.write_bytes(original)
 
 
-def run(plan: RunPlan, task: Task, *, keep_api_key: bool = False) -> int:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOG_DIR / plan.log_name
+def _rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _kill_tree(process: subprocess.Popen[str]) -> None:
+    """Завершить процесс сессии вместе с дочерними (оболочки, фоновые задачи)."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, check=False
+        )
+    else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, 9)
+    with contextlib.suppress(Exception):
+        process.kill()
+
+
+def _stream_process(
+    plan: RunPlan,
+    env: dict[str, str],
+    log_path: Path,
+    summary: StreamSummary,
+    idle_timeout_s: float,
+) -> tuple[int, str | None]:
+    """Выполнить сессию, писать лог и сводку. Возвращает (код выхода, причина остановки).
+
+    Причины: None — штатное завершение; "idle" — сторож: ни одной строки вывода за
+    `idle_timeout_s` секунд, сессия убита; "orphan-pipe" — процесс уже завершился, но канал
+    вывода держит чей-то потомок: ждём не дольше нескольких секунд и идём дальше.
+    """
+    extra: dict[str, Any] = {} if os.name == "nt" else {"start_new_session": True}
+    process = subprocess.Popen(
+        plan.command,
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        **extra,
+    )
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        assert process.stdout is not None
+        try:
+            for line in process.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    last_output = time.monotonic()
+    exited_at: float | None = None
+    reason: str | None = None
+    orphan_grace_s = 5.0
+
+    def handle(line: str, log: Any) -> None:
+        log.write(line)
+        log.flush()
+        if plan.channel == "claude":
+            summary.feed(line)
+        else:
+            print(line, end="", flush=True)
+
+    with log_path.open("w", encoding="utf-8") as log:
+        while True:
+            try:
+                line = lines.get(timeout=1.0)
+            except queue.Empty:
+                now = time.monotonic()
+                if process.poll() is not None:
+                    exited_at = exited_at or now
+                    if now - exited_at > orphan_grace_s:
+                        reason = "orphan-pipe"
+                        break
+                elif idle_timeout_s and now - last_output > idle_timeout_s:
+                    reason = "idle"
+                    break
+                continue
+            if line is None:
+                break
+            last_output = time.monotonic()
+            handle(line, log)
+        if reason is not None:
+            _kill_tree(process)
+        while True:  # хвост, успевший попасть в очередь
+            try:
+                line = lines.get_nowait()
+            except queue.Empty:
+                break
+            if line is not None:
+                handle(line, log)
+    code = process.wait()
+    if reason == "idle":
+        return IDLE_TIMEOUT_CODE, reason
+    return code, reason
+
+
+def run(
+    plan: RunPlan,
+    task: Task,
+    *,
+    keep_api_key: bool = False,
+    idle_timeout_min: float = DEFAULT_IDLE_TIMEOUT_MIN,
+    auth_retries: int = DEFAULT_AUTH_RETRIES,
+    auth_retry_delay_s: float = DEFAULT_AUTH_RETRY_DELAY_S,
+    log_dir: Path = LOG_DIR,
+) -> int:
+    """Запуск сессии со сторожем зависаний и повтором при `authentication_failed`.
+
+    Повтор — это новая сессия с тем же заданием: результаты прошлой лежат в файлах
+    и в `PROGRESS.md`, поэтому она продолжает, а не начинает с нуля.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     if plan.channel == "devin":
@@ -545,37 +720,38 @@ def run(plan: RunPlan, task: Task, *, keep_api_key: bool = False) -> int:
         # ANTHROPIC_API_KEY в -p важнее подписки: сессия ушла бы в оплату по API (D-28).
         env.pop("ANTHROPIC_API_KEY", None)
     print(f"[run] {task.id} → {plan.channel} {plan.model} {plan.effort}".rstrip())
-    print(f"[log] {log_path.relative_to(REPO_ROOT)}")
-    summary = StreamSummary()
-    model_context = (
-        devin_model_config(plan.model) if plan.channel == "devin" else contextlib.nullcontext()
-    )
-    with (
-        model_context,
-        log_path.open("w", encoding="utf-8") as log,
-        subprocess.Popen(
-            plan.command,
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        ) as process,
-    ):
-        assert process.stdout is not None
-        for line in process.stdout:
-            log.write(line)
-            log.flush()
-            if plan.channel == "claude":
-                summary.feed(line)
-            else:
-                print(line, end="", flush=True)
-        code = process.wait()
-    if plan.channel == "claude":
-        print(summary.report())
+    attempt = 0
+    while True:
+        log_name = plan.log_name
+        if attempt:
+            log_name = log_name.replace(".jsonl", f"_retry{attempt}.jsonl")
+        log_path = log_dir / log_name
+        print(f"[log] {_rel(log_path)}")
+        summary = StreamSummary()
+        model_context = (
+            devin_model_config(plan.model) if plan.channel == "devin" else contextlib.nullcontext()
+        )
+        with model_context:
+            code, reason = _stream_process(plan, env, log_path, summary, idle_timeout_min * 60)
+        if plan.channel == "claude":
+            print(summary.report())
+        if reason == "idle":
+            print(
+                f"[watchdog] {idle_timeout_min:g} мин без вывода: сессия остановлена "
+                f"(код {IDLE_TIMEOUT_CODE}). Перезапуск продолжит с готовых файлов."
+            )
+        elif reason == "orphan-pipe":
+            print("[watchdog] процесс завершился, но канал вывода держит потомок: идём дальше")
+        if summary.auth_failed and attempt < auth_retries:
+            delay = auth_retry_delay_s * 2**attempt
+            attempt += 1
+            print(
+                f"[retry] authentication_failed: повтор {attempt}/{auth_retries} "
+                f"через {delay:g} с (новая сессия продолжит с готовых файлов)"
+            )
+            time.sleep(delay)
+            continue
+        break
     print(f"код выхода: {code}")
     print(f"Проверьте: git log -1 --stat и раздел {task.id} в docs/ocr_tasks/PROGRESS.md")
     return code
@@ -712,6 +888,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--with-optional", action="store_true", help="в очереди и опциональные")
     parser.add_argument("--max-tasks", type=int, help="остановить очередь после N задач")
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=DEFAULT_IDLE_TIMEOUT_MIN,
+        help="минут без вывода до остановки зависшей сессии (0 — выключить)",
+    )
+    parser.add_argument(
+        "--auth-retries",
+        type=int,
+        default=DEFAULT_AUTH_RETRIES,
+        help="повторов сессии при authentication_failed (403)",
+    )
+    parser.add_argument(
+        "--auth-retry-delay",
+        type=float,
+        default=DEFAULT_AUTH_RETRY_DELAY_S,
+        help="пауза до первого повтора, сек (дальше удваивается)",
+    )
     return parser.parse_args(argv)
 
 
@@ -729,7 +923,14 @@ def run_single(task: Task, args: argparse.Namespace) -> int:
         return 0
     if args.fix and plan.effort == "max" and plan.channel == "claude":
         print(f"[i] следующая ступень после max — {ESCALATION_AFTER_MAX}")
-    return run(plan, task, keep_api_key=args.keep_api_key)
+    return run(
+        plan,
+        task,
+        keep_api_key=args.keep_api_key,
+        idle_timeout_min=args.idle_timeout,
+        auth_retries=args.auth_retries,
+        auth_retry_delay_s=args.auth_retry_delay,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
