@@ -142,7 +142,11 @@ def analyse(path: Path) -> dict[str, Any] | None:
                 if isinstance(value, int | float):
                     total[key] = total.get(key, 0) + value
     last = results[-1]
-    outcome = "ok" if not last.get("is_error") else str(last.get("subtype"))
+    if last.get("is_error"):
+        detail = str(last.get("result") or "")[:60]
+        outcome = f"ошибка: {last.get('terminal_reason') or last.get('subtype')} {detail}".strip()
+    else:
+        outcome = "ok"
     if assistants_after_result:
         outcome += f", затем оборвано ({assistants_after_result} сообщений после result)"
     row.update(
