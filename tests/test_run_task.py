@@ -100,8 +100,8 @@ def test_auth_failure_is_retried(tmp_path: Path) -> None:
     code = rt.run(
         _plan(f"print({event!r}); raise SystemExit(1)"),
         _task(),
-        auth_retries=1,
-        auth_retry_delay_s=0,
+        api_retries=1,
+        api_retry_delay_s=0,
         log_dir=tmp_path,
     )
     assert code == 1
@@ -125,8 +125,8 @@ def test_auth_retry_stops_after_success(tmp_path: Path) -> None:
             f"m.write_text('x'); print({event!r}); sys.exit(1)\n"
         ),
         _task(),
-        auth_retries=3,
-        auth_retry_delay_s=0,
+        api_retries=3,
+        api_retry_delay_s=0,
         log_dir=tmp_path,
     )
     assert code == 0
@@ -137,9 +137,91 @@ def test_no_retry_without_auth_failure(tmp_path: Path) -> None:
     code = rt.run(
         _plan("raise SystemExit(5)"),
         _task(),
-        auth_retries=2,
-        auth_retry_delay_s=0,
+        api_retries=2,
+        api_retry_delay_s=0,
         log_dir=tmp_path,
     )
     assert code == 5
     assert len(list(tmp_path.iterdir())) == 1
+
+
+def _api_error_session(status_text: str) -> str:
+    """Код сессии, которая печатает ошибку API так же, как `claude -p`, и выходит с 1."""
+    assistant = json.dumps(
+        {
+            "type": "assistant",
+            "error": "unknown",
+            "message": {"content": [{"type": "text", "text": status_text}]},
+        }
+    )
+    result = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "terminal_reason": "api_error",
+            "result": status_text,
+        }
+    )
+    return f"print({assistant!r}); print({result!r}); raise SystemExit(1)"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API Error: 408 Request timeout",
+        "API Error: 429 rate limited",
+        "API Error: 503 Service Unavailable",
+        "API Error: 529 Overloaded",
+        "API Error: Connection reset by peer",
+    ],
+)
+def test_transient_api_errors_are_retried(tmp_path: Path, text: str) -> None:
+    rt.run(
+        _plan(_api_error_session(text)),
+        _task(),
+        api_retries=1,
+        api_retry_delay_s=0,
+        log_dir=tmp_path,
+    )
+    assert len(list(tmp_path.iterdir())) == 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "API Error: 400 invalid request",
+        "API Error: 413 request too large",
+        "API Error: 404 model not found",
+        "API Error: something unexpected",
+    ],
+)
+def test_permanent_api_errors_are_not_retried(tmp_path: Path, text: str) -> None:
+    rt.run(
+        _plan(_api_error_session(text)),
+        _task(),
+        api_retries=2,
+        api_retry_delay_s=0,
+        log_dir=tmp_path,
+    )
+    assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_retry_delay_is_capped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(rt.time, "sleep", sleeps.append)
+    rt.run(
+        _plan(_api_error_session("API Error: 408 Request timeout")),
+        _task(),
+        api_retries=4,
+        api_retry_delay_s=1000,
+        log_dir=tmp_path,
+    )
+    assert sleeps == [1000, 1800, 1800, 1800]
+
+
+def test_cli_accepts_old_and_new_retry_flags() -> None:
+    new = rt.parse_args(["--all", "--api-retries", "5", "--api-retry-delay", "7"])
+    old = rt.parse_args(["--all", "--auth-retries", "5", "--auth-retry-delay", "7"])
+    assert (new.api_retries, new.api_retry_delay) == (5, 7.0)
+    assert (old.api_retries, old.api_retry_delay) == (5, 7.0)

@@ -79,9 +79,21 @@ DEVIN_PERMISSION_MODE = "dangerous"
 IDLE_TIMEOUT_CODE = 124
 # Сторож: сколько минут без единой строки вывода считать сессию зависшей (0 — выключен).
 DEFAULT_IDLE_TIMEOUT_MIN = 40.0
-# Повторы сессии при `authentication_failed` (403): сколько раз и пауза до первого повтора, сек.
-DEFAULT_AUTH_RETRIES = 2
-DEFAULT_AUTH_RETRY_DELAY_S = 120.0
+# Повторы сессии при временных ошибках API (403 `authentication_failed`, 408, 429, 5xx,
+# перегрузка, обрыв соединения): сколько раз и пауза до первого повтора, сек (дальше
+# удваивается, не больше MAX_API_RETRY_DELAY_S). Сам `claude` уже повторил запрос до 10 раз.
+DEFAULT_API_RETRIES = 3
+DEFAULT_API_RETRY_DELAY_S = 120.0
+MAX_API_RETRY_DELAY_S = 1800.0
+# Коды HTTP, при которых повтор сессии имеет смысл. 400/404/413 и т. п. — нет.
+TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+# Текст ошибки без кода: признаки временной проблемы сети или перегрузки.
+_TRANSIENT_TEXT_RE = re.compile(
+    r"timed? ?out|timeout|overload|rate.?limit|temporar|connection (?:reset|refused|error)"
+    r"|econnreset|socket hang up|service unavailable|bad gateway|gateway time",
+    re.IGNORECASE,
+)
+_API_ERROR_RE = re.compile(r"API Error:\s*(\d{3})?\s*(.*)", re.IGNORECASE | re.DOTALL)
 # Цепочка эскалации в Claude Code: сначала effort, потом модель (§ 8.3).
 ESCALATION = {
     ("claude-sonnet-5", "low"): ("claude-sonnet-5", "medium"),
@@ -478,6 +490,7 @@ class StreamSummary:
         self.init: dict[str, Any] | None = None
         self.tool_calls = 0
         self.auth_failed = False
+        self.api_error: tuple[int | None, str] | None = None
 
     def feed(self, line: str) -> None:
         try:
@@ -493,12 +506,45 @@ class StreamSummary:
             if event.get("error") == "authentication_failed":
                 self.auth_failed = True
                 self._print("[auth] authentication_failed (403): сессия потеряла доступ к API")
+            elif event.get("error"):
+                self._note_api_error(event)
             for block in event.get("message", {}).get("content", []):
                 self._assistant_block(block)
         elif kind == "result":
             self.result = event
+            if event.get("is_error") and event.get("terminal_reason") == "api_error":
+                self._note_api_error(
+                    {"message": {"content": [{"type": "text", "text": event.get("result", "")}]}}
+                )
         elif kind == "rate_limit_event":
             self._rate_limit(event)
+
+    def _note_api_error(self, event: dict[str, Any]) -> None:
+        """Запомнить «API Error: NNN …» из текста ответа или итога сессии."""
+        for block in event.get("message", {}).get("content", []) or []:
+            if block.get("type") != "text":
+                continue
+            match = _API_ERROR_RE.match(str(block.get("text", "")).strip())
+            if match:
+                status = int(match.group(1)) if match.group(1) else None
+                self.api_error = (status, match.group(2).strip()[:200])
+                self._print(f"[api-error] {status or '?'} {self.api_error[1]}")
+
+    def retry_reason(self) -> str | None:
+        """Причина, по которой имеет смысл перезапустить сессию, либо None.
+
+        Повторяем: `authentication_failed` и временные ошибки API (408, 429, 5xx,
+        перегрузка, обрыв сети). Не повторяем: 400/404/413 и прочие ошибки запроса,
+        «Not logged in», `error_max_turns`: перезапуск их не исправит.
+        """
+        if self.auth_failed:
+            return "authentication_failed (403)"
+        if self.api_error is None:
+            return None
+        status, text = self.api_error
+        if status is not None:
+            return f"API Error {status}" if status in TRANSIENT_HTTP_STATUSES else None
+        return f"API Error: {text[:60]}" if _TRANSIENT_TEXT_RE.search(text) else None
 
     def _assistant_block(self, block: dict[str, Any]) -> None:
         if block.get("type") == "text":
@@ -698,11 +744,11 @@ def run(
     *,
     keep_api_key: bool = False,
     idle_timeout_min: float = DEFAULT_IDLE_TIMEOUT_MIN,
-    auth_retries: int = DEFAULT_AUTH_RETRIES,
-    auth_retry_delay_s: float = DEFAULT_AUTH_RETRY_DELAY_S,
+    api_retries: int = DEFAULT_API_RETRIES,
+    api_retry_delay_s: float = DEFAULT_API_RETRY_DELAY_S,
     log_dir: Path = LOG_DIR,
 ) -> int:
-    """Запуск сессии со сторожем зависаний и повтором при `authentication_failed`.
+    """Запуск сессии со сторожем зависаний и повтором при временных ошибках API.
 
     Повтор — это новая сессия с тем же заданием: результаты прошлой лежат в файлах
     и в `PROGRESS.md`, поэтому она продолжает, а не начинает с нуля.
@@ -742,11 +788,12 @@ def run(
             )
         elif reason == "orphan-pipe":
             print("[watchdog] процесс завершился, но канал вывода держит потомок: идём дальше")
-        if summary.auth_failed and attempt < auth_retries:
-            delay = auth_retry_delay_s * 2**attempt
+        retry_reason = summary.retry_reason() if plan.channel == "claude" else None
+        if retry_reason and reason != "idle" and attempt < api_retries:
+            delay = min(api_retry_delay_s * 2**attempt, MAX_API_RETRY_DELAY_S)
             attempt += 1
             print(
-                f"[retry] authentication_failed: повтор {attempt}/{auth_retries} "
+                f"[retry] {retry_reason}: повтор {attempt}/{api_retries} "
                 f"через {delay:g} с (новая сессия продолжит с готовых файлов)"
             )
             time.sleep(delay)
@@ -895,16 +942,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="минут без вывода до остановки зависшей сессии (0 — выключить)",
     )
     parser.add_argument(
+        "--api-retries",
         "--auth-retries",
+        dest="api_retries",
         type=int,
-        default=DEFAULT_AUTH_RETRIES,
-        help="повторов сессии при authentication_failed (403)",
+        default=DEFAULT_API_RETRIES,
+        help="повторов сессии при временных ошибках API: 403, 408, 429, 5xx, обрыв сети",
     )
     parser.add_argument(
+        "--api-retry-delay",
         "--auth-retry-delay",
+        dest="api_retry_delay",
         type=float,
-        default=DEFAULT_AUTH_RETRY_DELAY_S,
-        help="пауза до первого повтора, сек (дальше удваивается)",
+        default=DEFAULT_API_RETRY_DELAY_S,
+        help="пауза до первого повтора, сек (дальше удваивается, не больше 30 мин)",
     )
     return parser.parse_args(argv)
 
@@ -928,8 +979,8 @@ def run_single(task: Task, args: argparse.Namespace) -> int:
         task,
         keep_api_key=args.keep_api_key,
         idle_timeout_min=args.idle_timeout,
-        auth_retries=args.auth_retries,
-        auth_retry_delay_s=args.auth_retry_delay,
+        api_retries=args.api_retries,
+        api_retry_delay_s=args.api_retry_delay,
     )
 
 
