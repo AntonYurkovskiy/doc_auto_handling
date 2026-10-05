@@ -1,13 +1,24 @@
-"""Тесты лаборатории вариантов бланка (T07): метрики, обезличивание, статичный эталон."""
+"""Тесты лаборатории вариантов бланка (T07): метрики, обезличивание, статичный эталон.
+
+В конце — тесты макетов боксов подполей и кропов (T08): `app.ocr.layouts`, `app.ocr.crops`.
+"""
 
 from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 import pandas as pd
 import pytest
 
+from app.ocr import layouts as boxes
 from app.ocr.align import AlignParams, build_reference
+from app.ocr.crops import crop_box, crop_subfields, find_lines, locate_boxes
 from ocr_lab import layouts as lab
 from tests.ocr.synth import PAGE_H, PAGE_W, make_form
 
@@ -258,3 +269,251 @@ def test_block_fit_row_separates_bands() -> None:
     row = lab.block_fit_row("s1", "synth", warped, layout, anchors)
     assert row["head_n"] >= 3 and float(row["head_med"]) == 0.0
     assert row["date_n"] >= 3 and float(row["date_med"]) == pytest.approx(10.0, abs=0.5)
+
+
+# --- T08: макеты боксов подполей и кропы ---------------------------------------------------
+
+#: Синтетический бланк для боксов: подчёркивания частей строки ``(x0, x1)`` и высоты строк.
+SYN_SIZE = (1000, 700)
+SYN_PARTS = {"day": (100, 200), "month": (230, 400), "hour": (500, 640), "minute": (700, 860)}
+SYN_ROW_Y = {row: 220 + 100 * i for i, row in enumerate(boxes.DATE_ROWS)}
+SYN_NUMBER = (300, 500, 100)
+
+
+def _syn_box(name: str, line: tuple[int, int, int]) -> boxes.Box:
+    x0, x1, y = line
+    return boxes.Box(
+        name=name,
+        x0=x0 - 20,
+        y0=y - 70,
+        x1=x1 + 20,
+        y1=y + 12,
+        kind=boxes.EXPECTED_KIND[name],
+        printed_by_template=name == boxes.VOUCHER_NUMBER or name.endswith((".day", ".month")),
+        line=line,
+    )
+
+
+def _syn_layout() -> boxes.Layout:
+    items = [_syn_box(boxes.VOUCHER_NUMBER, SYN_NUMBER)]
+    for row, y in SYN_ROW_Y.items():
+        for part, (x0, x1) in SYN_PARTS.items():
+            items.append(_syn_box(f"{row}.{part}", (x0, x1, y)))
+    return boxes.Layout("syn_v1", "s", SYN_SIZE, tuple(items))
+
+
+def _line(layout: boxes.Layout, name: str) -> tuple[int, int, int]:
+    line = layout.box(name).line
+    assert line is not None
+    return line
+
+
+def _syn_page(
+    layout: boxes.Layout,
+    dx: int = 0,
+    dy: int = 0,
+    skip: tuple[str, ...] = (),
+    ends: dict[str, tuple[int, int]] | None = None,
+) -> np.ndarray:
+    """Белая страница с подчёркиваниями макета, сдвинутыми на ``(dx, dy)``.
+
+    ``skip`` — подполя без линии; ``ends`` — поправки концов линии ``(слева, справа)``.
+    """
+    page = np.full((SYN_SIZE[1], SYN_SIZE[0]), 255, np.uint8)
+    for box in layout.boxes:
+        if box.line is None or box.name in skip:
+            continue
+        x0, x1, y = box.line
+        e0, e1 = (ends or {}).get(box.name, (0, 0))
+        # Толщина 3 px: середина по толщине — ровно y + dy.
+        page[y + dy - 1 : y + dy + 2, x0 + dx + e0 : x1 + dx + e1] = 0
+    return page
+
+
+def test_box_layouts_committed_for_kommunar() -> None:
+    loaded = boxes.load_layouts()
+    kommunar = [name for name in loaded if name.startswith("kommunar_")]
+    assert kommunar, "нет макета Коммунара в app/ocr/layouts/"
+    for name in kommunar:
+        layout = loaded[name]
+        assert len(layout.boxes) == 17
+        assert set(layout.names) == set(boxes.SUBFIELD_NAMES)
+        assert layout.tug_code == "k"
+        assert all(box.line is not None for box in layout.boxes)
+
+
+def test_box_layout_save_load_roundtrip(tmp_path: Path) -> None:
+    layout = _syn_layout()
+    path = tmp_path / "syn_v1.json"
+    boxes.save_layout(layout, path)
+    assert boxes.load_layout(path) == layout
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert [b["name"] for b in data["boxes"]] == list(boxes.SUBFIELD_NAMES)
+    assert boxes.load_layouts(tmp_path) == {"syn_v1": layout}
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda d: d["boxes"][1].update(name="left_base.year"), "неизвестное подполе"),
+        (lambda d: d["boxes"][2].update(name="left_base.day"), "дубль подполя"),
+        (lambda d: d["boxes"][1].update(x1=5000), "выходит за эталон"),
+        (lambda d: d["boxes"][1].update(y0=-1), "выходит за эталон"),
+        (lambda d: d["boxes"][1].update(x1=50), "пустой бокс"),
+        (lambda d: d["boxes"][0].update(kind="two_digit"), "ожидался 'number'"),
+        (lambda d: d["boxes"][1].update(kind="letters"), "неизвестный вид"),
+        (lambda d: d["boxes"].pop(), "нет подполей: finished_work.minute"),
+        (lambda d: d["boxes"][1].update(x0=1.5), "ожидалось целое"),
+        (lambda d: d["boxes"][1].update(line=[1, 2]), "line должен быть"),
+        (lambda d: d["boxes"][1].update(line=[300, 200, 10]), "подчёркивание"),
+        (lambda d: d["boxes"][1].update(printed_by_template="да"), "должен быть bool"),
+        (lambda d: d["boxes"][1].pop("kind"), "нет ключа 'kind'"),
+        (lambda d: d.update(ref_size=[1000]), "ref_size"),
+    ],
+)
+def test_box_layout_validation_errors(
+    mutate: Callable[[dict[str, Any]], object], message: str, tmp_path: Path
+) -> None:
+    data = boxes.layout_to_dict(_syn_layout())
+    mutate(data)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(boxes.LayoutError, match=message):
+        boxes.load_layout(path)
+
+
+def test_box_layout_rejects_non_json_and_duplicate_variant(tmp_path: Path) -> None:
+    (tmp_path / "a.json").write_text("{не json", encoding="utf-8")
+    with pytest.raises(boxes.LayoutError, match="не JSON"):
+        boxes.load_layout(tmp_path / "a.json")
+    layout = _syn_layout()
+    boxes.save_layout(layout, tmp_path / "a.json")
+    boxes.save_layout(layout, tmp_path / "b.json")
+    with pytest.raises(boxes.LayoutError, match="уже загружен"):
+        boxes.load_layouts(tmp_path)
+    assert boxes.load_layouts(tmp_path / "нет") == {}
+
+
+def test_crop_subfields_shapes_and_padding() -> None:
+    layout = _syn_layout()
+    page = np.arange(SYN_SIZE[0] * SYN_SIZE[1], dtype=np.uint32).reshape(SYN_SIZE[::-1])
+    page = (page % 251).astype(np.uint8)
+    crops = crop_subfields(page, layout, refine=False)
+    assert set(crops) == set(boxes.SUBFIELD_NAMES)
+    box = layout.box("left_base.hour")
+    assert crops[box.name].shape == (box.height, box.width)
+    assert np.array_equal(crops[box.name], page[box.y0 : box.y1, box.x0 : box.x1])
+    padded = crop_subfields(page, layout, pad=7, names=[box.name], refine=False)
+    assert list(padded) == [box.name]
+    assert padded[box.name].shape == (box.height + 14, box.width + 14)
+    assert np.array_equal(padded[box.name][7:-7, 7:-7], crops[box.name])
+
+
+def test_crop_box_fills_outside_image() -> None:
+    page = np.zeros((50, 80, 3), np.uint8)
+    box = boxes.Box("left_base.day", 0, 40, 30, 50, "two_digit")
+    crop = crop_box(page, box, pad=5)
+    assert crop.shape == (20, 40, 3)
+    assert (crop[:5, 5:] == 0).all()  # над боксом — изображение
+    assert (crop[-5:] == 255).all()  # ниже края — заливка
+    assert (crop[:, :5] == 255).all()  # левее края — заливка
+    assert (crop[5:15, 5:35] == 0).all()
+    assert (crop_box(page, box, pad=5, fill=128)[-1] == 128).all()
+    with pytest.raises(ValueError, match="pad"):
+        crop_box(page, box, pad=-1)
+
+
+def test_crop_subfields_checks_size_and_names() -> None:
+    layout = _syn_layout()
+    with pytest.raises(ValueError, match="не совпадает с эталоном"):
+        crop_subfields(np.zeros((10, 10), np.uint8), layout)
+    with pytest.raises(KeyError, match="left_base.year"):
+        crop_subfields(_syn_page(layout), layout, names=["left_base.year"])
+
+
+def test_find_lines_ignores_short_and_vertical_strokes() -> None:
+    page = np.full((100, 300), 255, np.uint8)
+    page[50:53, 20:220] = 0
+    page[20:23, 240:270] = 0  # короче MIN_LINE_PX
+    page[10:90, 150:153] = 0  # вертикальный штрих
+    lines = find_lines(page, offset=(5, 7))
+    assert [(s.x0, s.x1, round(s.y)) for s in lines] == [(25, 225, 58)]
+
+
+def test_locate_boxes_follows_shifted_lines() -> None:
+    layout = _syn_layout()
+    placed = locate_boxes(_syn_page(layout, dx=15, dy=6), layout)
+    for box in layout.boxes:
+        p = placed[box.name]
+        assert p.source == "line", box.name
+        assert (p.dx0, p.dx1, p.dy) == (15, 15, 6), box.name
+        assert p.box == replace(box, x0=box.x0 + 15, x1=box.x1 + 15, y0=box.y0 + 6, y1=box.y1 + 6)
+    # Без линий боксы остаются на месте.
+    empty = locate_boxes(_syn_page(layout, skip=layout.names), layout)
+    assert {p.source for p in empty.values()} == {"static"}
+    assert all(p.box == layout.box(name) for name, p in empty.items())
+
+
+def test_locate_boxes_fallbacks_column_and_row() -> None:
+    layout = _syn_layout()
+    # Минуты не найдены в одной строке — сдвиг минут других строк.
+    placed = locate_boxes(_syn_page(layout, dx=-20, dy=4, skip=("arrived_base.minute",)), layout)
+    p = placed["arrived_base.minute"]
+    assert p.source == "column"
+    assert (p.dx0, p.dx1, p.dy) == (-20, -20, 4)
+    # Минут нет нигде — сдвиг ближайшего найденного бокса строки (часы).
+    skip_all = tuple(f"{row}.minute" for row in boxes.DATE_ROWS)
+    placed = locate_boxes(_syn_page(layout, dx=-20, dy=4, skip=skip_all), layout)
+    p = placed["left_base.minute"]
+    assert p.source == "row"
+    assert (p.dx0, p.dx1, p.dy) == (-20, -20, 4)
+
+
+def test_locate_boxes_edge_rules() -> None:
+    layout = _syn_layout()
+    ends = {
+        "left_base.day": (0, -20),  # короткое подчёркивание дня: бокс сужается
+        "left_base.hour": (0, 30),  # длинное подчёркивание часов: бокс расширяется
+        "arrived_base.month": (25, 0),  # короче слева: бокс месяца не сужается
+    }
+    placed = locate_boxes(_syn_page(layout, ends=ends), layout)
+    assert (placed["left_base.day"].dx0, placed["left_base.day"].dx1) == (0, -20)
+    assert (placed["left_base.hour"].dx0, placed["left_base.hour"].dx1) == (0, 30)
+    assert (placed["arrived_base.month"].dx0, placed["arrived_base.month"].dx1) == (0, 25)
+
+
+def test_locate_boxes_ignores_handwriting_stroke_near_line() -> None:
+    layout = _syn_layout()
+    page = _syn_page(layout, dx=-30)
+    x0, _, y = _line(layout, "finished_work.day")
+    # Низ рукописной «2» — горизонтальный штрих 55 px чуть выше подчёркивания; его левый
+    # конец ближе к эталонному краю, чем настоящий край линии.
+    page[y - 10 : y - 7, x0 + 10 : x0 + 65] = 0
+    p = locate_boxes(page, layout)["finished_work.day"]
+    assert (p.dx0, p.dx1, p.dy) == (-30, -30, 0)
+
+
+def test_locate_boxes_wide_search_for_shifted_header() -> None:
+    layout = _syn_layout()
+    page = _syn_page(layout, skip=(boxes.VOUCHER_NUMBER,))
+    x0, x1, y = SYN_NUMBER
+    # Шапка съехала на 60 px вверх и 100 px вправо: обычное окно её не видит.
+    page[y - 61 : y - 58, x0 + 100 : x1 + 100] = 0
+    p = locate_boxes(page, layout)[boxes.VOUCHER_NUMBER]
+    assert p.source == "line_wide"
+    assert (p.dx0, p.dx1, p.dy) == (100, 100, -60)
+
+
+def test_locate_boxes_does_not_cross_neighbour_line() -> None:
+    layout = _syn_layout()
+    # Подчёркивание часов уехало вправо на 50 px и заходит в бокс минут (до линии минут
+    # остаётся зазор 10 px, линии не сливаются).
+    page = _syn_page(layout, skip=("left_base.hour",))
+    x0, x1, y = _line(layout, "left_base.hour")
+    page[y - 1 : y + 2, x0 + 50 : x1 + 50] = 0
+    placed = locate_boxes(page, layout)
+    hour, minute = placed["left_base.hour"].box, placed["left_base.minute"].box
+    assert hour.x0 == layout.box("left_base.hour").x0 + 50
+    # Левая сторона минут не заходит левее правого конца подчёркивания часов.
+    assert minute.x0 == x1 + 50
+    assert minute.x1 == layout.box("left_base.minute").x1

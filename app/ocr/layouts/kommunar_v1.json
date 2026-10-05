@@ -1,0 +1,19 @@
+{"variant": "kommunar_v1", "tug_code": "k", "ref_size": [1654, 2340], "version": 1, "boxes": [
+  {"name": "voucher_number", "x0": 796, "y0": 606, "x1": 1048, "y1": 716, "kind": "number", "printed_by_template": true, "line": [806, 1012, 700]},
+  {"name": "left_base.day", "x0": 522, "y0": 1152, "x1": 672, "y1": 1244, "kind": "two_digit", "printed_by_template": true, "line": [552, 653, 1230]},
+  {"name": "left_base.month", "x0": 662, "y0": 1152, "x1": 802, "y1": 1244, "kind": "two_digit", "printed_by_template": true, "line": [679, 875, 1230]},
+  {"name": "left_base.hour", "x0": 1000, "y0": 1153, "x1": 1171, "y1": 1245, "kind": "two_digit", "printed_by_template": false, "line": [1016, 1157, 1231]},
+  {"name": "left_base.minute", "x0": 1215, "y0": 1153, "x1": 1404, "y1": 1245, "kind": "two_digit", "printed_by_template": false, "line": [1229, 1390, 1231]},
+  {"name": "arrived_base.day", "x0": 521, "y0": 1244, "x1": 671, "y1": 1336, "kind": "two_digit", "printed_by_template": true, "line": [551, 652, 1322]},
+  {"name": "arrived_base.month", "x0": 661, "y0": 1244, "x1": 803, "y1": 1336, "kind": "two_digit", "printed_by_template": true, "line": [678, 876, 1322]},
+  {"name": "arrived_base.hour", "x0": 993, "y0": 1245, "x1": 1161, "y1": 1337, "kind": "two_digit", "printed_by_template": false, "line": [1009, 1147, 1323]},
+  {"name": "arrived_base.minute", "x0": 1217, "y0": 1245, "x1": 1405, "y1": 1337, "kind": "two_digit", "printed_by_template": false, "line": [1231, 1391, 1323]},
+  {"name": "started_work.day", "x0": 521, "y0": 1336, "x1": 672, "y1": 1428, "kind": "two_digit", "printed_by_template": true, "line": [551, 653, 1414]},
+  {"name": "started_work.month", "x0": 662, "y0": 1335, "x1": 804, "y1": 1427, "kind": "two_digit", "printed_by_template": true, "line": [679, 877, 1413]},
+  {"name": "started_work.hour", "x0": 995, "y0": 1337, "x1": 1184, "y1": 1429, "kind": "two_digit", "printed_by_template": false, "line": [1011, 1170, 1415]},
+  {"name": "started_work.minute", "x0": 1227, "y0": 1338, "x1": 1416, "y1": 1430, "kind": "two_digit", "printed_by_template": false, "line": [1241, 1402, 1416]},
+  {"name": "finished_work.day", "x0": 522, "y0": 1429, "x1": 673, "y1": 1521, "kind": "two_digit", "printed_by_template": true, "line": [552, 654, 1507]},
+  {"name": "finished_work.month", "x0": 663, "y0": 1429, "x1": 805, "y1": 1521, "kind": "two_digit", "printed_by_template": true, "line": [680, 878, 1507]},
+  {"name": "finished_work.hour", "x0": 997, "y0": 1430, "x1": 1185, "y1": 1522, "kind": "two_digit", "printed_by_template": false, "line": [1013, 1171, 1508]},
+  {"name": "finished_work.minute", "x0": 1229, "y0": 1430, "x1": 1417, "y1": 1522, "kind": "two_digit", "printed_by_template": false, "line": [1243, 1403, 1508]}
+]}
