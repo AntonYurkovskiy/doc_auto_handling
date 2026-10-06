@@ -32,22 +32,42 @@
      подчёркивание рвётся.
 
    Найден один край — бокс едет за ним. Вертикальный сдвиг — по высоте найденной линии.
+   Высота строки (T09). Подчёркивания одной строки набраны одной строкой текста и лежат
+   на одной прямой (строка бывает наклонена). Ожидаемая высота бокса — прямая через
+   найденные линии соседей по строке (нужно не меньше :data:`ROW_MIN_FITS` соседей, наклон
+   не больше :data:`MAX_ROW_SLOPE`). Если линия бокса не найдена или отстоит от ожидаемой
+   высоты дальше :data:`ROW_DY_TOL_PX`, поиск (п. 2, затем п. 4) повторяется только среди
+   линий на этой высоте, и в п. 2 берётся только целая линия (оба конца). Так отсекаются
+   ножки засечек печатного слова: у Courier на бланке Пионера низ слова «Time» — сплошная
+   линия длиной с подчёркивание часов, на 10–12 px выше него. Если и так ничего нет,
+   первая находка отбрасывается, и бокс идёт на запасные пути (п. 6).
 4. Если краёв рядом нет (подчёркивание уехало дальше :data:`EDGE_TOLERANCE_PX` — так
    бывает с часами и минутами, они плывут отдельно от дня и месяца), ищется целая линия
    длиной как подчёркивание эталона (±:data:`LENGTH_TOL`), ближайшая к нему по центру,
-   в окне шире по горизонтали (:data:`SEARCH_DX_WIDE_PX`; ``source="line_len"``).
+   в окне шире по горизонтали (:data:`SEARCH_DX_WIDE_PX`; ``source="line_len"``). Линии,
+   уже найденные соседями по строке, не берутся: иначе бокс месяца без своего
+   подчёркивания (печатный месяц «_03_») уезжает на подчёркивание дня той же длины.
 5. Если не нашлось ничего во всей строке (так бывает с шапкой: на единичных сканах
    она съезжает на 70 px по вертикали и 100 px по горизонтали), такой же поиск идёт и
-   в окне выше по вертикали (:data:`SEARCH_DY_WIDE_PX`; ``source="line_wide"``).
+   в окне выше по вертикали (:data:`SEARCH_DY_WIDE_PX`; ``source="line_wide"``). Если
+   линии подходящей длины нет и там, в том же окне ищется целая линия по обоим концам,
+   как в п. 2 (T09: у Пионера длина подчёркивания номера от скана к скану меняется
+   вдвое, от 65 до 170 px).
 6. Иначе бокс берёт медианный сдвиг той же части в других строках (``source="column"``:
    табуляция у строк общая), а высоту — от ближайшего найденного бокса своей строки.
    Если такой части нигде не нашлось — сдвиг ближайшего по горизонтали найденного бокса
-   той же строки (``source="row"``), а если и в строке ничего — бокс остаётся на месте
+   той же строки (``source="row"``): бокс целиком едет за ближним к нему краем соседа
+   (за правым, если сосед слева). Текст между ними — печатный, и короткое подчёркивание
+   соседа сдвигает всё, что правее. Если и в строке ничего — бокс остаётся на месте
    (``source="static"``).
 7. Соседи по строке не залезают друг к другу: бокс не заходит левее найденного правого
    края подчёркивания левого соседа и правее найденного левого края правого соседа.
    Так в бокс минут не попадают часы, а в бокс месяца — день. Если от такой обрезки бокс
-   стал бы уже :data:`MIN_WIDTH_FRACTION` эталонного, она не применяется.
+   стал бы уже :data:`MIN_WIDTH_FRACTION` эталонного, она не применяется. Если
+   подчёркивания соседей слились в одну линию (у левого найден только левый край, у
+   правого — только правый), стык считается по длине подчёркивания соседа в эталоне
+   (T09: у Коммунара так в строке «Начало работ» на трети сканов, и в бокс месяца
+   попадал хвост дня).
 
 Зависимости — только numpy и opencv.
 """
@@ -92,6 +112,15 @@ MIN_WIDTH_FRACTION = 0.6
 MAX_SHIFT_PX = 90
 #: Боксы с подчёркиваниями ближе этого по высоте — одна строка (запасные сдвиги, обрезка).
 SAME_ROW_PX = 30
+#: Высота строки (п. 3): сколько найденных соседей по строке нужно для оценки, допуск
+#: от ожидаемой высоты (px) и предельный наклон строки (px на px).
+ROW_MIN_FITS = 2
+ROW_DY_TOL_PX = 7
+MAX_ROW_SLOPE = 0.03
+#: Штраф за наклон строки при поиске выбившейся линии: px отклонения на единицу наклона.
+ROW_SLOPE_COST_PX = 300
+#: Конец линии ближе этого к найденному концу линии соседа — это линия соседа.
+CLAIMED_PX = 2
 
 
 @dataclass(frozen=True)
@@ -152,9 +181,16 @@ def _nearest(values: list[tuple[int, float]], target: int) -> tuple[int, float] 
 
 
 def _window(
-    gray: np.ndarray, box: Box, dx: int, dy: int
+    gray: np.ndarray,
+    box: Box,
+    dx: int,
+    dy: int,
+    y_range: tuple[float, float] | None = None,
 ) -> tuple[list[LineSegment], int, int]:
-    """Линии в окне вокруг подчёркивания бокса и левая/правая границы окна."""
+    """Линии в окне вокруг подчёркивания бокса и левая/правая границы окна.
+
+    ``y_range`` — оставить только линии с высотой в этих пределах (высота строки, п. 3).
+    """
     assert box.line is not None
     lx0, lx1, ly = box.line
     h, w = gray.shape[:2]
@@ -162,19 +198,54 @@ def _window(
     wy0, wy1 = max(ly - dy, 0), min(ly + dy + 1, h)
     if wx1 <= wx0 or wy1 <= wy0:
         return [], wx0, wx1
-    return find_lines(gray[wy0:wy1, wx0:wx1], offset=(wx0, wy0)), wx0, wx1
+    segments = find_lines(gray[wy0:wy1, wx0:wx1], offset=(wx0, wy0))
+    if y_range is not None:
+        segments = [s for s in segments if y_range[0] <= s.y <= y_range[1]]
+    return segments, wx0, wx1
 
 
-def _fit_line_len(gray: np.ndarray, box: Box, search_dy: int) -> LineSegment | None:
-    """Целая линия длиной как подчёркивание эталона, ближайшая к нему, или ``None``."""
+def _fit_line_len(
+    gray: np.ndarray,
+    box: Box,
+    search_dy: int,
+    *,
+    y_range: tuple[float, float] | None = None,
+    claimed: Iterable[tuple[int | None, int | None]] = (),
+    expected: tuple[float, list[float]] | None = None,
+) -> LineSegment | None:
+    """Целая линия длиной как подчёркивание эталона, ближайшая к нему, или ``None``.
+
+    ``claimed`` — найденные края подчёркиваний соседей по строке: их линии не берутся.
+    ``expected`` — ожидаемые центры по x подчёркиваний ``(своего, [соседей по строке])``:
+    линия, чей центр ближе к ожидаемому месту соседа, чем к своему, — линия соседа.
+    """
     assert box.line is not None
     lx0, lx1, ly = box.line
-    segments, wx0, wx1 = _window(gray, box, SEARCH_DX_WIDE_PX, search_dy)
+    segments, wx0, wx1 = _window(gray, box, SEARCH_DX_WIDE_PX, search_dy, y_range)
     length = lx1 - lx0
+    taken = list(claimed)
+
+    def is_claimed(s: LineSegment) -> bool:
+        return any(
+            (left is not None and abs(s.x0 - left) <= CLAIMED_PX)
+            or (right is not None and abs(s.x1 - right) <= CLAIMED_PX)
+            for left, right in taken
+        )
+
     whole = [
         s
         for s in segments
-        if s.x0 > wx0 and s.x1 < wx1 and abs((s.x1 - s.x0) - length) <= LENGTH_TOL * length
+        if s.x0 > wx0
+        and s.x1 < wx1
+        and abs((s.x1 - s.x0) - length) <= LENGTH_TOL * length
+        and not is_claimed(s)
+        and (
+            expected is None
+            or all(
+                abs((s.x0 + s.x1) / 2 - expected[0]) <= abs((s.x0 + s.x1) / 2 - rival)
+                for rival in expected[1]
+            )
+        )
     ]
     if not whole:
         return None
@@ -182,14 +253,19 @@ def _fit_line_len(gray: np.ndarray, box: Box, search_dy: int) -> LineSegment | N
     return min(whole, key=lambda s: math.hypot((s.x0 + s.x1) / 2 - cx, s.y - cy))
 
 
-def _fit_line(gray: np.ndarray, box: Box) -> tuple[int | None, int | None, int | None]:
+def _fit_line(
+    gray: np.ndarray,
+    box: Box,
+    y_range: tuple[float, float] | None = None,
+    search_dy: int = SEARCH_DY_PX,
+) -> tuple[int | None, int | None, int | None]:
     """Найденные края подчёркивания ``(левый x, правый x)`` и вертикальный сдвиг.
 
     Каждое значение — ``None``, если не найдено.
     """
     assert box.line is not None
     lx0, lx1, ly = box.line
-    segments, wx0, wx1 = _window(gray, box, SEARCH_DX_PX, SEARCH_DY_PX)
+    segments, wx0, wx1 = _window(gray, box, SEARCH_DX_PX, search_dy, y_range)
     segments = [s for s in segments if s.x1 - s.x0 >= MIN_LINE_FRACTION * (lx1 - lx0)]
     whole = [
         s
@@ -226,6 +302,59 @@ def _center(box: Box) -> float:
     return (x0 + x1) / 2
 
 
+def _row_line(points: list[tuple[float, float]]) -> tuple[float, float, float]:
+    """Прямая строки по точкам ``(x, dy)``: ``(средний x, средний dy, наклон)``.
+
+    МНК; наклон ограничен :data:`MAX_ROW_SLOPE`, чтобы два близких соседа не дали дикой
+    экстраполяции.
+    """
+    xs = np.array([p[0] for p in points], dtype=float)
+    ys = np.array([p[1] for p in points], dtype=float)
+    mx, my = float(xs.mean()), float(ys.mean())
+    var = float(((xs - mx) ** 2).sum())
+    slope = 0.0 if var == 0 else float(((xs - mx) * (ys - my)).sum()) / var
+    return mx, my, max(-MAX_ROW_SLOPE, min(MAX_ROW_SLOPE, slope))
+
+
+def _row_height(points: list[tuple[float, float]], x: float) -> float:
+    """Ожидаемый вертикальный сдвиг подчёркивания в точке ``x`` по сдвигам ``points``."""
+    mx, my, slope = _row_line(points)
+    return my + slope * (x - mx)
+
+
+def _row_spread(points: list[tuple[float, float]]) -> tuple[float, float]:
+    """Наибольшее отклонение точек от прямой строки и её наклон."""
+    mx, my, slope = _row_line(points)
+    return max(abs(y - (my + slope * (x - mx))) for x, y in points), slope
+
+
+def _row_outlier(points: dict[str, tuple[float, float]], candidates: set[str]) -> str | None:
+    """Бокс из ``candidates``, чья линия выбивается из прямой строки, или ``None``.
+
+    ``points`` — ``{имя: (x, dy)}`` найденных линий строки (не меньше трёх). Если все лежат
+    на прямой с допуском :data:`ROW_DY_TOL_PX` — ``None``. Иначе выбивается та линия, без
+    которой остальные ложатся на прямую лучше всего; к отклонению добавляется штраф за
+    наклон (:data:`ROW_SLOPE_COST_PX`). Без штрафа при трёх линиях любые две лежат на
+    прямой, а сильный наклон строки встречается реже чужой линии.
+    """
+    if len(points) < ROW_MIN_FITS + 1:
+        return None
+    # Каждая линия сверяется с прямой через остальные: прямая через все сразу «съедает»
+    # выброс (при четырёх линиях отклонение засечек от неё меньше допуска).
+    if all(
+        abs(y - _row_height([q for m, q in points.items() if m != n], x)) <= ROW_DY_TOL_PX
+        for n, (x, y) in points.items()
+    ):
+        return None
+    best: tuple[float, str] | None = None
+    for name in sorted(candidates & set(points)):
+        spread, slope = _row_spread([p for n, p in points.items() if n != name])
+        cost = spread + abs(slope) * ROW_SLOPE_COST_PX
+        if best is None or cost < best[0]:
+            best = (cost, name)
+    return None if best is None else best[1]
+
+
 def _nearest_box(boxes: list[Box], box: Box) -> Box:
     """Ближайший к ``box`` по горизонтали бокс из ``boxes``."""
     return min(boxes, key=lambda other: abs(_center(other) - _center(box)))
@@ -259,30 +388,30 @@ def locate_boxes(warped: np.ndarray, layout: Layout) -> dict[str, Placement]:
     fits: dict[str, tuple[int, int, int, str]] = {}
     edges: dict[str, tuple[int | None, int | None]] = {}
     lined = [box for box in layout.boxes if box.line is not None]
-    for box in lined:
-        left, right, dy = _fit_line(gray, box)
+
+    def fit_by_edges(
+        box: Box,
+        y_range: tuple[float, float] | None = None,
+        *,
+        search_dy: int = SEARCH_DY_PX,
+        source: str | None = None,
+    ) -> bool:
+        left, right, dy = _fit_line(gray, box, y_range, search_dy)
+        if (y_range is not None or source is not None) and (left is None or right is None):
+            # Повторный поиск на высоте строки (п. 3) и широкий поиск (п. 5) берут только
+            # целую линию: край чужой линии хуже первой находки или запасного пути.
+            return False
         shifts = _edge_shifts(box, left, right)
         if shifts is None or max(abs(shifts[0]), abs(shifts[1]), abs(dy or 0)) > MAX_SHIFT_PX:
-            continue
-        if left is not None and right is not None:
-            source = "line"
-        else:
-            source = "line_left" if left is not None else "line_right"
+            return False
+        if source is None:
+            if left is not None and right is not None:
+                source = "line"
+            else:
+                source = "line_left" if left is not None else "line_right"
         fits[box.name] = (*shifts, dy or 0, source)
         edges[box.name] = (left, right)
-
-    def fit_by_length(box: Box, search_dy: int, source: str) -> None:
-        assert box.line is not None
-        seg = _fit_line_len(gray, box, search_dy)
-        if seg is not None:
-            shifts = _edge_shifts(box, seg.x0, seg.x1)
-            assert shifts is not None
-            fits[box.name] = (*shifts, round(seg.y - box.line[2]), source)
-            edges[box.name] = (seg.x0, seg.x1)
-
-    for box in lined:
-        if box.name not in fits:
-            fit_by_length(box, SEARCH_DY_PX, "line_len")
+        return True
 
     def row_mates(box: Box) -> list[Box]:
         assert box.line is not None
@@ -294,9 +423,92 @@ def locate_boxes(warped: np.ndarray, layout: Layout) -> dict[str, Placement]:
             and abs(other.line[2] - box.line[2]) <= SAME_ROW_PX
         ]
 
+    def fit_by_length(
+        box: Box, search_dy: int, source: str, y_range: tuple[float, float] | None = None
+    ) -> bool:
+        assert box.line is not None
+        # Чужой считается только линия, найденная соседом целиком (оба конца): по одному
+        # краю сосед мог зацепить общую длинную линию («___02 2026»), которая нужна и боксу.
+        claimed = [
+            edges[m.name]
+            for m in row_mates(box)
+            if m.name in edges and None not in edges[m.name]
+        ]
+        # Ожидаемые места подчёркиваний: найденные соседи — где нашлись, остальные — на
+        # месте эталона со сдвигом строки (медиана сдвигов найденных соседей). У Пионера
+        # подчёркивания дня и месяца почти одной длины: без этого месяц брал линию
+        # ненайденного дня.
+        mates = row_mates(box)
+        found = [(fits[m.name][0] + fits[m.name][1]) / 2 for m in mates if m.name in fits]
+        row_shift = statistics.median(found) if found else 0.0
+        rivals = []
+        for m in mates:
+            assert m.line is not None
+            shift = (fits[m.name][0] + fits[m.name][1]) / 2 if m.name in fits else row_shift
+            rivals.append((m.line[0] + m.line[1]) / 2 + shift)
+        own = (box.line[0] + box.line[1]) / 2 + row_shift
+        seg = _fit_line_len(
+            gray, box, search_dy, y_range=y_range, claimed=claimed, expected=(own, rivals)
+        )
+        if seg is None:
+            return False
+        shifts = _edge_shifts(box, seg.x0, seg.x1)
+        assert shifts is not None
+        fits[box.name] = (*shifts, round(seg.y - box.line[2]), source)
+        edges[box.name] = (seg.x0, seg.x1)
+        return True
+
+    for box in lined:
+        fit_by_edges(box)
+
+    # П. 3, высота строки. В каждой строке по одному разбираются боксы, чья линия
+    # выбивается из прямой через остальные (_row_outlier), затем не найденные боксы.
+    # После каждой правки прямая пересчитывается.
+    rows: list[list[Box]] = []
+    for box in lined:
+        for row in rows:
+            if box in row_mates(row[0]):
+                row.append(box)
+                break
+        else:
+            rows.append([box])
+    dropped: set[str] = set()
+
+    def refit_at_row_height(box: Box) -> None:
+        assert box.line is not None
+        others = [(_center(m), float(fits[m.name][2])) for m in row_mates(box) if m.name in fits]
+        y = box.line[2] + _row_height(others, _center(box))
+        y_range = (y - ROW_DY_TOL_PX, y + ROW_DY_TOL_PX)
+        if fit_by_edges(box, y_range) or fit_by_length(box, SEARCH_DY_PX, "line_len", y_range):
+            return
+        # Линии на высоте строки нет: первая находка — чужая линия (засечки печатного
+        # слова), бокс уходит на запасные пути (п. 6).
+        fits.pop(box.name, None)
+        edges.pop(box.name, None)
+        dropped.add(box.name)
+
+    for row in rows:
+        candidates = {box.name for box in row}
+        while True:
+            points = {b.name: (_center(b), float(fits[b.name][2])) for b in row if b.name in fits}
+            name = _row_outlier(points, candidates)
+            if name is None:
+                break
+            candidates.discard(name)
+            refit_at_row_height(layout.box(name))
+        for box in row:
+            found = sum(m.name in fits for m in row_mates(box))
+            if box.name not in fits and found >= ROW_MIN_FITS:
+                refit_at_row_height(box)
+
+    for box in lined:
+        if box.name not in fits and box.name not in dropped:
+            fit_by_length(box, SEARCH_DY_PX, "line_len")
+
     for box in lined:
         if box.name not in fits and not any(m.name in fits for m in row_mates(box)):
-            fit_by_length(box, SEARCH_DY_WIDE_PX, "line_wide")
+            if not fit_by_length(box, SEARCH_DY_WIDE_PX, "line_wide"):
+                fit_by_edges(box, search_dy=SEARCH_DY_WIDE_PX, source="line_wide")
 
     placed: dict[str, tuple[int, int, int, str]] = {}
     for box in layout.boxes:
@@ -318,9 +530,12 @@ def locate_boxes(warped: np.ndarray, layout: Layout) -> dict[str, Placement]:
             placed[box.name] = (d0, d1, dy, "column")
         elif found_mates:
             # Ближайший по горизонтали сосед: часы и минуты плывут вместе, день и месяц —
-            # вместе, а две половины строки — независимо.
-            d0, d1, dy, _ = fits[_nearest_box(found_mates, box).name]
-            placed[box.name] = (d0, d1, dy, "row")
+            # вместе, а две половины строки — независимо. Бокс едет целиком за ближним
+            # к нему краем соседа.
+            mate = _nearest_box(found_mates, box)
+            d0, d1, dy, _ = fits[mate.name]
+            shift = d1 if _center(mate) < _center(box) else d0
+            placed[box.name] = (shift, shift, dy, "row")
         else:
             placed[box.name] = (0, 0, 0, "static")
 
@@ -331,8 +546,20 @@ def locate_boxes(warped: np.ndarray, layout: Layout) -> dict[str, Placement]:
         if box.line is not None:
             # П. 7: не заходить за найденные концы подчёркиваний соседей по строке.
             min_width = MIN_WIDTH_FRACTION * box.width
+            own_left, own_right = edges.get(box.name, (None, None))
             for mate in row_mates(box):
+                assert mate.line is not None
                 mate_left, mate_right = edges.get(mate.name, (None, None))
+                length = mate.line[1] - mate.line[0]
+                # Слитые подчёркивания: у соседа найден только дальний конец, у бокса —
+                # только свой дальний, общий стык не виден. Конец соседа — по длине его
+                # подчёркивания в эталоне: раз линии сомкнулись, настоящий конец не ближе.
+                if _center(mate) < _center(box) and mate_left is not None:
+                    if mate_right is None and own_left is None and own_right is not None:
+                        mate_right = mate_left + length
+                elif _center(mate) > _center(box) and mate_right is not None:
+                    if mate_left is None and own_right is None and own_left is not None:
+                        mate_left = mate_right - length
                 if _center(mate) < _center(box) and mate_right is not None:
                     if mate_right > x0 and x1 - mate_right >= min_width:
                         x0 = mate_right

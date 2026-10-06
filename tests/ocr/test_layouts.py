@@ -18,7 +18,8 @@ import pytest
 
 from app.ocr import layouts as boxes
 from app.ocr.align import AlignParams, build_reference
-from app.ocr.crops import crop_box, crop_subfields, find_lines, locate_boxes
+from app.ocr.crops import SEARCH_DY_PX, crop_box, crop_subfields, find_lines, locate_boxes
+from app.ocr.crops import _fit_line_len as fit_line_len
 from ocr_lab import layouts as lab
 from tests.ocr.synth import PAGE_H, PAGE_W, make_form
 
@@ -330,15 +331,17 @@ def _syn_page(
     return page
 
 
-def test_box_layouts_committed_for_kommunar() -> None:
+def test_box_layouts_committed_for_all_variants() -> None:
+    # Варианты бланка из T07: макеты боксов есть у каждого (T08 — Коммунар, T09 — Пионер).
     loaded = boxes.load_layouts()
-    kommunar = [name for name in loaded if name.startswith("kommunar_")]
-    assert kommunar, "нет макета Коммунара в app/ocr/layouts/"
-    for name in kommunar:
+    expected = {"kommunar_v1": "k", "pioneer_v1": "p", "pioneer_v2": "p"}
+    assert set(expected) <= set(loaded), "нет макета варианта в app/ocr/layouts/"
+    for name, tug_code in expected.items():
         layout = loaded[name]
         assert len(layout.boxes) == 17
         assert set(layout.names) == set(boxes.SUBFIELD_NAMES)
-        assert layout.tug_code == "k"
+        assert layout.tug_code == tug_code
+        assert layout.ref_size == (1654, 2340)
         assert all(box.line is not None for box in layout.boxes)
 
 
@@ -517,3 +520,91 @@ def test_locate_boxes_does_not_cross_neighbour_line() -> None:
     # Левая сторона минут не заходит левее правого конца подчёркивания часов.
     assert minute.x0 == x1 + 50
     assert minute.x1 == layout.box("left_base.minute").x1
+
+
+def test_locate_boxes_merged_lines_split_by_template_length() -> None:
+    layout = _syn_layout()
+    # Подчёркивания дня и месяца слились в одну линию 100…360: месяц уехал влево на 40 px
+    # (Коммунар, строка «Начало работ»). У дня найден только левый конец, у месяца — правый.
+    page = _syn_page(layout, skip=("left_base.day", "left_base.month"))
+    y = _line(layout, "left_base.day")[2]
+    page[y - 1 : y + 2, 100:360] = 0
+    placed = locate_boxes(page, layout)
+    day, month = placed["left_base.day"], placed["left_base.month"]
+    assert (day.source, month.source) == ("line_left", "line_right")
+    # Стык — по длине подчёркиваний эталона: день кончается на 100 + 100, месяц
+    # начинается на 360 − 170. Без этого бокс месяца (170…380) захватывал бы хвост дня.
+    assert (month.box.x0, month.box.x1) == (200, 380)
+    assert (day.box.x0, day.box.x1) == (80, 190)
+
+
+def test_fit_line_len_skips_line_at_neighbour_place() -> None:
+    layout = _syn_layout()
+    month = layout.box("left_base.month")
+    y = _line(layout, "left_base.month")[2]
+    # Линия длиной как подчёркивание месяца (170 px), но на месте дня (центр 170 при
+    # ожидаемом центре дня 150 и месяца 315): так у Пионера месяц брал линию ненайденного
+    # дня (2025_185p).
+    page = np.full((SYN_SIZE[1], SYN_SIZE[0]), 255, np.uint8)
+    page[y - 1 : y + 2, 85:255] = 0
+    seg = fit_line_len(page, month, SEARCH_DY_PX)
+    assert seg is not None and (seg.x0, seg.x1) == (85, 255)
+    assert fit_line_len(page, month, SEARCH_DY_PX, expected=(315.0, [150.0, 570.0])) is None
+    # Та же линия при ожидаемом месте месяца рядом — своя.
+    found = fit_line_len(page, month, SEARCH_DY_PX, expected=(200.0, [100.0, 570.0]))
+    assert found is not None
+
+
+def test_locate_boxes_prefers_line_at_row_height() -> None:
+    layout = _syn_layout()
+    page = _syn_page(layout, skip=("left_base.hour",))
+    x0, x1, y = _line(layout, "left_base.hour")
+    # Подчёркивание часов уехало вправо на 50 px, а на месте эталонного, на 12 px выше, —
+    # сплошной низ печатного слова (засечки «Time» у Courier) той же длины.
+    page[y - 1 : y + 2, x0 + 50 : x1 + 50] = 0
+    page[y - 13 : y - 10, x0 - 5 : x1 - 5] = 0
+    p = locate_boxes(page, layout)["left_base.hour"]
+    assert p.source == "line"
+    # Правая сторона обрезана по левому концу подчёркивания минут (п. 7): 20 + 50 → 40.
+    assert (p.dx0, p.dx1, p.dy) == (50, 40, 0)
+
+
+def test_locate_boxes_drops_foreign_line_off_row_height() -> None:
+    layout = _syn_layout()
+    page = _syn_page(layout, skip=("left_base.hour",))
+    x0, x1, y = _line(layout, "left_base.hour")
+    # Своего подчёркивания нет, есть только линия засечек выше строки: она не берётся,
+    # бокс идёт на запасной путь (часы других строк).
+    page[y - 13 : y - 10, x0 - 5 : x1 - 5] = 0
+    p = locate_boxes(page, layout)["left_base.hour"]
+    assert p.source == "column"
+    assert (p.dx0, p.dx1, p.dy) == (0, 0, 0)
+
+
+def test_locate_boxes_month_without_line_follows_day() -> None:
+    layout = _syn_layout()
+    months = tuple(f"{row}.month" for row in boxes.DATE_ROWS)
+    # Печатный месяц без подчёркивания («» _03_ 2025» у Пионера). Подчёркивание дня
+    # длиннее эталонного на 70 px и длиной как подчёркивание месяца: поиск по длине не
+    # должен отдать месяцу линию дня.
+    page = _syn_page(layout, skip=months, ends={"left_base.day": (0, 70)})
+    placed = locate_boxes(page, layout)
+    day, month = placed["left_base.day"], placed["left_base.month"]
+    assert (day.source, day.dx0, day.dx1) == ("line", 0, 70)
+    # Месяц едет целиком за правым краем дня.
+    assert month.source == "row"
+    assert (month.dx0, month.dx1, month.dy) == (70, 70, 0)
+    assert placed["arrived_base.month"].source == "row"
+    assert (placed["arrived_base.month"].dx0, placed["arrived_base.month"].dx1) == (0, 0)
+
+
+def test_locate_boxes_wide_search_by_ends_for_odd_length() -> None:
+    layout = _syn_layout()
+    page = _syn_page(layout, skip=(boxes.VOUCHER_NUMBER,))
+    x0, x1, y = SYN_NUMBER
+    # Шапка съехала на 50 px вверх, подчёркивание номера на 35 % длиннее эталонного:
+    # поиск по длине его не берёт, берёт поиск по обоим концам.
+    page[y - 51 : y - 48, x0 - 10 : x1 + 60] = 0
+    p = locate_boxes(page, layout)[boxes.VOUCHER_NUMBER]
+    assert p.source == "line_wide"
+    assert (p.dx0, p.dx1, p.dy) == (-10, 60, -50)
