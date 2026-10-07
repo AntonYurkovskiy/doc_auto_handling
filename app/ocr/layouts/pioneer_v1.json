@@ -1,19 +1,19 @@
-{"variant": "pioneer_v1", "tug_code": "p", "ref_size": [1654, 2340], "version": 1, "boxes": [
+{"variant": "pioneer_v1", "tug_code": "p", "ref_size": [1654, 2340], "version": 2, "boxes": [
   {"name": "voucher_number", "x0": 962, "y0": 575, "x1": 1171, "y1": 680, "kind": "number", "printed_by_template": true, "line": [987, 1096, 665]},
   {"name": "left_base.day", "x0": 635, "y0": 1174, "x1": 758, "y1": 1286, "kind": "two_digit", "printed_by_template": true, "line": [655, 743, 1264]},
   {"name": "left_base.month", "x0": 758, "y0": 1176, "x1": 874, "y1": 1288, "kind": "two_digit", "printed_by_template": true, "line": [768, 859, 1266]},
   {"name": "left_base.hour", "x0": 1072, "y0": 1176, "x1": 1199, "y1": 1288, "kind": "two_digit", "printed_by_template": false, "line": [1092, 1157, 1266]},
-  {"name": "left_base.minute", "x0": 1233, "y0": 1178, "x1": 1363, "y1": 1290, "kind": "two_digit", "printed_by_template": false, "line": [1263, 1327, 1268]},
+  {"name": "left_base.minute", "x0": 1233, "y0": 1178, "x1": 1387, "y1": 1290, "kind": "two_digit", "printed_by_template": false, "line": [1263, 1327, 1268]},
   {"name": "arrived_base.day", "x0": 636, "y0": 1298, "x1": 765, "y1": 1410, "kind": "two_digit", "printed_by_template": true, "line": [656, 750, 1388]},
   {"name": "arrived_base.month", "x0": 758, "y0": 1299, "x1": 874, "y1": 1411, "kind": "two_digit", "printed_by_template": true, "line": [768, 859, 1389]},
   {"name": "arrived_base.hour", "x0": 1072, "y0": 1300, "x1": 1198, "y1": 1412, "kind": "two_digit", "printed_by_template": false, "line": [1092, 1156, 1390]},
-  {"name": "arrived_base.minute", "x0": 1230, "y0": 1302, "x1": 1359, "y1": 1414, "kind": "two_digit", "printed_by_template": false, "line": [1260, 1323, 1392]},
+  {"name": "arrived_base.minute", "x0": 1230, "y0": 1302, "x1": 1383, "y1": 1414, "kind": "two_digit", "printed_by_template": false, "line": [1260, 1323, 1392]},
   {"name": "started_work.day", "x0": 615, "y0": 1422, "x1": 744, "y1": 1534, "kind": "two_digit", "printed_by_template": true, "line": [635, 729, 1512]},
   {"name": "started_work.month", "x0": 758, "y0": 1423, "x1": 876, "y1": 1535, "kind": "two_digit", "printed_by_template": true, "line": [768, 861, 1513]},
   {"name": "started_work.hour", "x0": 1077, "y0": 1424, "x1": 1203, "y1": 1536, "kind": "two_digit", "printed_by_template": false, "line": [1097, 1161, 1514]},
-  {"name": "started_work.minute", "x0": 1235, "y0": 1425, "x1": 1363, "y1": 1537, "kind": "two_digit", "printed_by_template": false, "line": [1265, 1327, 1515]},
+  {"name": "started_work.minute", "x0": 1235, "y0": 1425, "x1": 1387, "y1": 1537, "kind": "two_digit", "printed_by_template": false, "line": [1265, 1327, 1515]},
   {"name": "finished_work.day", "x0": 615, "y0": 1546, "x1": 744, "y1": 1658, "kind": "two_digit", "printed_by_template": true, "line": [635, 729, 1636]},
   {"name": "finished_work.month", "x0": 758, "y0": 1546, "x1": 876, "y1": 1658, "kind": "two_digit", "printed_by_template": true, "line": [768, 861, 1636]},
   {"name": "finished_work.hour", "x0": 1077, "y0": 1547, "x1": 1202, "y1": 1659, "kind": "two_digit", "printed_by_template": false, "line": [1097, 1160, 1637]},
-  {"name": "finished_work.minute", "x0": 1233, "y0": 1548, "x1": 1362, "y1": 1660, "kind": "two_digit", "printed_by_template": false, "line": [1263, 1326, 1638]}
+  {"name": "finished_work.minute", "x0": 1233, "y0": 1548, "x1": 1386, "y1": 1660, "kind": "two_digit", "printed_by_template": false, "line": [1263, 1326, 1638]}
 ]}
