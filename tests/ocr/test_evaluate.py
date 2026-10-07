@@ -281,6 +281,24 @@ def test_printed_flags_slice(manifest: Path, tmp_path: Path) -> None:
     assert ev.load_printed_flags(tmp_path / "nope.csv") == {}
 
 
+def test_printed_flags_t12_schema(tmp_path: Path) -> None:
+    """Схема T12 (`scan_id, group, kind`): день/месяц разворачиваются на все 4 строки."""
+    flags_path = tmp_path / "printed_flags.csv"
+    flags_path.write_text(
+        "scan_id,group,kind\n"
+        "2026_101k,voucher_number,printed\n"
+        "2026_101k,day,handwritten\n"
+        "2026_101k,month,unclear\n",
+        encoding="utf-8",
+    )
+    flags = ev.load_printed_flags(flags_path)
+    assert flags[("2026_101k", "voucher_number")] is True
+    for row in ("left_base", "arrived_base", "started_work", "finished_work"):
+        assert flags[("2026_101k", f"{row}.day")] is False
+        # kind=unclear пропускается — ключа для month нет.
+        assert ("2026_101k", f"{row}.month") not in flags
+
+
 # --- Автоприём ----------------------------------------------------------------------------
 
 

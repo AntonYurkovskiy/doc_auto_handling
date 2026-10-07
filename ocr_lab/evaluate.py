@@ -132,18 +132,39 @@ def load_truth(manifest: Path, split: str = "all") -> dict[str, ScanTruth]:
     return out
 
 
-def load_printed_flags(path: Path | None) -> dict[tuple[str, str], bool]:
-    """Флаги «печатное/рукописное» из CSV `scan_id, field, printed`.
+#: T12 размечает день/месяц по строке `left_base` на все 4 строки сразу (решение T12:
+#: способ записи одинаков внутри ваучера) и отдельно номер ваучера.
+_PRINTED_GROUP_ROWS = {"voucher_number": (VOUCHER_NUMBER,), "day": ROWS, "month": ROWS}
 
-    `field` — подполе (`left_base.hour`), строка бланка (`left_base`, действует на все её
-    части) или `voucher_number`. Нет файла — пустой словарь.
+
+def load_printed_flags(path: Path | None) -> dict[tuple[str, str], bool]:
+    """Флаги «печатное/рукописное» из CSV T12 (`data/ocr/labels/printed_flags.csv`).
+
+    Поддерживает две схемы (определяется по заголовку):
+    - T12 (`scan_id, group, kind`) — `group` ∈ `voucher_number, day, month`, `kind` ∈
+      `printed, handwritten, empty, unclear`. `day`/`month` разворачиваются на все 4 строки
+      бланка (`<row>.day`/`<row>.month`), `empty`/`unclear` пропускаются (неизвестно).
+    - более ранний контракт T13 (`scan_id, field, printed`) — `field` уже подполе/строка/
+      `voucher_number`, `printed` — булево. Нет файла — пустой словарь.
     """
     if path is None or not path.exists():
         return {}
     out: dict[tuple[str, str], bool] = {}
     with path.open(encoding="utf-8-sig", newline="") as fh:
-        for rec in csv.DictReader(fh):
-            out[(rec["scan_id"].strip(), rec["field"].strip())] = _to_bool(rec.get("printed"))
+        reader = csv.DictReader(fh)
+        is_t12_schema = reader.fieldnames is not None and "group" in reader.fieldnames
+        for rec in reader:
+            scan_id = rec["scan_id"].strip()
+            if is_t12_schema:
+                group, kind = rec["group"].strip(), rec["kind"].strip()
+                if kind not in ("printed", "handwritten"):
+                    continue
+                printed = kind == "printed"
+                for row in _PRINTED_GROUP_ROWS.get(group, ()):
+                    key = row if group == "voucher_number" else f"{row}.{group}"
+                    out[(scan_id, key)] = printed
+            else:
+                out[(scan_id, rec["field"].strip())] = _to_bool(rec.get("printed"))
     return out
 
 
