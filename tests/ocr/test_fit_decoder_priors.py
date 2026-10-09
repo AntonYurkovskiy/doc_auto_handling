@@ -4,12 +4,25 @@ from __future__ import annotations
 
 import csv
 import json
+import math
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import numpy as np
+import pytest
 
-from app.ocr.decoder import CHAIN, PARTS, DecoderModel, decode, subfield
+from app.ocr.decoder import (
+    CHAIN,
+    PARTS,
+    DecoderModel,
+    _evidence,
+    _score_scalar,
+    decode,
+    subfield,
+)
 from ocr_lab import fit_decoder_priors as fit
+from ocr_lab.evaluate import evaluate, load_truth
+from ocr_lab.predictions import read_predictions
 
 ROW_FIELDS = ("dt", "day", "month", "year", "hour", "minute")
 
@@ -106,6 +119,7 @@ def test_fit_priors_and_weights_on_synthetic_manifest(tmp_path):
 
     code = fit.main(
         [
+            "fit",
             "--manifest",
             str(manifest),
             "--pred",
@@ -147,7 +161,7 @@ def test_fit_priors_without_predictions_keeps_default_weights(tmp_path):
     manifest = tmp_path / "manifest.csv"
     _write_manifest(manifest, rng)
     out = tmp_path / "decoder_priors_v0.json"
-    assert fit.main(["--manifest", str(manifest), "--out", str(out)]) == 0
+    assert fit.main(["fit", "--manifest", str(manifest), "--out", str(out), "--no-weights"]) == 0
     model = DecoderModel.load(out)
     assert model.meta["weights_fit_on"] is None
     assert model.weights == DecoderModel.default().weights
@@ -178,3 +192,144 @@ def test_truth_forms_keeps_hour24_and_offsets():
     assert forms is not None
     assert fit.form_minutes(forms) == [22 * 60, 23 * 60, 24 * 60, 1440 + 40]
     assert fit.chain_ok(row, forms)
+
+
+def test_fit_priors_ties_hour24_to_midnight_and_counts_late_finish(tmp_path):
+    rng = np.random.default_rng(11)
+    rows = _write_manifest(tmp_path / "manifest.csv", rng)
+    train = [r for r in rows if r["split"] == "train"]
+    # Один бланк с Приходом на 20 минут раньше Окончания и один — на 2 часа (вне окна).
+    for row, minutes in ((train[5], 20), (train[6], 120)):
+        fin = datetime.fromisoformat(row["finished_work_dt"])
+        arr = fin - timedelta(minutes=minutes)
+        row.update(
+            {
+                "arrived_base_dt": arr.isoformat(timespec="minutes"),
+                "arrived_base_day": str(arr.day),
+                "arrived_base_month": str(arr.month),
+                "arrived_base_year": str(arr.year),
+                "arrived_base_hour": str(arr.hour),
+                "arrived_base_minute": str(arr.minute),
+                "chain_ok": "False",
+            }
+        )
+    priors, stats = fit.fit_priors(train)
+    for name in CHAIN:
+        hour = np.exp(priors.hour_array(name))
+        assert hour[24] == pytest.approx(hour[0])
+        assert hour.sum() == pytest.approx(1.0)
+    assert stats.late_finish == 1
+    assert stats.late_finish_beyond == 1
+    assert priors.late_finish_max == 30.0
+    expected = (1 + 200 * 0.005) / (stats.train_vouchers + 200)
+    assert priors.late_finish_logp == pytest.approx(math.log(expected / 30.0))
+
+
+def test_bootstrap_support_rejects_gain_of_single_voucher():
+    spread = np.full(51, 0.02)
+    single = np.zeros(51)
+    single[3] = 1.0
+    mixed = np.zeros(51)
+    mixed[:2] = [1.2, -0.9]
+    assert fit.bootstrap_support(spread) == 1.0
+    assert fit.bootstrap_support(single) < 0.8
+    assert fit.bootstrap_support(mixed) < 0.9
+
+
+def test_truth_outside_candidates_is_added_to_normalizer(tmp_path):
+    rng = np.random.default_rng(5)
+    rows = _write_manifest(tmp_path / "manifest.csv", rng)
+    row = next(r for r in rows if r["split"] == "val")
+    fields = {
+        subfield(name, part): [(int(row[f"{name}_{part}"]), 0.97)]
+        for name in CHAIN
+        for part in PARTS
+    }
+    true_hour = int(row["left_base_hour"])
+    wrong = true_hour - 1 if true_hour > 5 else true_hour + 1
+    fields["left_base.hour"] = [(wrong, 0.6), (true_hour + 5, 0.39)]
+    sample = fit.build_samples([row], {row["scan_id"]: fields})[0]
+    model = DecoderModel.default()
+    narrow = replace(model, search=replace(model.search, all_hours=False))
+    logp, reachable = fit.truth_log_prob(narrow, sample)
+    assert not reachable
+    assert fit.LOG_P_CLIP < logp < 0.0
+    result = decode(sample.inputs, sample.context, narrow)
+    ev = _evidence(sample.inputs, narrow.search.prob_floor)
+    score = _score_scalar(sample.forms, ev, sample.context, narrow)
+    assert logp == pytest.approx(score - float(np.logaddexp(result.log_z, score)))
+    wide_logp, wide_reach = fit.truth_log_prob(model, sample)
+    assert wide_reach
+
+
+def test_predict_split_writes_t13_jsonl_readable_by_evaluate(tmp_path):
+    rng = np.random.default_rng(9)
+    manifest = tmp_path / "manifest.csv"
+    rows = _write_manifest(manifest, rng)
+    val = [r for r in rows if r["split"] == "val"]
+    inputs = {r["scan_id"]: _noisy_fields(r, rng) for r in val}
+    inputs = {
+        k: {f: [(int(v), float(p)) for v, p in d] for f, d in x.items()} for k, x in inputs.items()
+    }
+    del inputs[val[0]["scan_id"]]["left_base.minute"]  # пропуск подполя
+    out = tmp_path / "decoder_v0" / "val_predictions.jsonl"
+    numbers = {val[1]["scan_id"]: [[7, 0.9]]}
+    stats = fit.predict_split(
+        "val", DecoderModel.default(), inputs, fit.read_manifest(manifest), out, numbers=numbers
+    )
+    assert stats.n_scans == len(val)
+    assert stats.n_no_candidates == 0
+    assert stats.ms_median > 0
+    preds = {p.scan_id: p for p in read_predictions(out)}
+    assert set(preds) == {r["scan_id"] for r in val}
+    first = preds[val[0]["scan_id"]]
+    assert first.source == fit.SOURCE
+    assert 1 <= len(first.records) <= 5
+    assert first.confidence is not None and first.margin is not None
+    assert "left_base.minute" not in first.fields
+    assert preds[val[1]["scan_id"]].fields["voucher_number"] == [(7, 0.9)]
+    raw = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    assert "missing_subfields" in raw["flags"]
+    metrics = evaluate(load_truth(manifest, "val"), read_predictions(out))
+    assert metrics["n_matched"] == len(val)
+    assert metrics["vouchers"]["rows"]["all"]["accuracy"] > 0.5
+    assert metrics["auto_accept"]["n_with_confidence"] == len(val)
+
+
+def test_split_crops_strips_scan_id_and_skips_failed_alignment(tmp_path):
+    manifest = tmp_path / "manifest.csv"
+    with manifest.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["scan_id", "split"])
+        writer.writeheader()
+        writer.writerows(
+            [{"scan_id": "2026_223k ", "split": "test"}, {"scan_id": "x", "split": "val"}]
+        )
+    index = tmp_path / "crops_index.csv"
+    with index.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["scan_id", "subfield", "path", "align_ok"])
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "scan_id": "2026_223k ",
+                    "subfield": "left_base.hour",
+                    "path": "a.png",
+                    "align_ok": "True",
+                },
+                {
+                    "scan_id": "2026_223k ",
+                    "subfield": "voucher_number",
+                    "path": "b.png",
+                    "align_ok": "True",
+                },
+                {
+                    "scan_id": "2026_223k ",
+                    "subfield": "left_base.day",
+                    "path": "c.png",
+                    "align_ok": "False",
+                },
+                {"scan_id": "x", "subfield": "left_base.hour", "path": "d.png", "align_ok": "True"},
+            ]
+        )
+    crops = fit.split_crops("test", manifest=manifest, index_csv=index)
+    assert crops == [("2026_223k", "left_base.hour", tmp_path / "a.png")]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 import time as time_mod
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 
 import numpy as np
@@ -14,6 +15,7 @@ from app.ocr.decoder import (
     CHAIN,
     FLAG_CROSSES_MIDNIGHT,
     FLAG_HOUR24,
+    FLAG_LATE_FINISH,
     FLAG_MISSING,
     FLAG_NO_CANDIDATES,
     FLAG_TOP1_CHAIN_VIOLATION,
@@ -187,6 +189,68 @@ def test_hour24_with_nonzero_minutes_is_rejected():
             assert not (option.value.hour == 24 and option.value.minute != 0)
 
 
+# Мягкое правило «Окончание ≤ Приход» (T04): Приход раньше на 10–20 минут допустим.
+def test_late_finish_within_window_is_soft():
+    truth: Truth = {
+        "left_base": (25, 5, 20, 30),
+        "started_work": (25, 5, 20, 40),
+        "finished_work": (25, 5, 21, 40),
+        "arrived_base": (25, 5, 21, 20),
+    }
+    inputs = make_inputs(truth, conf=0.995)
+    result = decode(inputs, CTX)
+    top = result.top
+    assert top.rows["finished_work"].dt == datetime(2026, 5, 25, 21, 40)
+    assert top.rows["arrived_base"].dt == datetime(2026, 5, 25, 21, 20)
+    assert FLAG_LATE_FINISH in result.flags
+    assert FLAG_TOP1_CHAIN_VIOLATION in result.flags
+    # Штраф есть: та же запись без нарушения оценивается выше.
+    ok = {**truth, "arrived_base": (25, 5, 21, 50)}
+    forms = forms_from_values({row: dict(zip(PARTS, ok[row], strict=True)) for row in CHAIN}, 2026)
+    model = DecoderModel.default()
+    ev = _evidence(make_inputs(ok, conf=0.995), model.search.prob_floor)
+    assert _score_scalar(forms, ev, CTX, model) > top.score
+
+
+def test_late_finish_beyond_window_is_rejected():
+    truth: Truth = {
+        "left_base": (25, 5, 20, 30),
+        "started_work": (25, 5, 20, 40),
+        "finished_work": (25, 5, 22, 40),
+        "arrived_base": (25, 5, 21, 20),
+    }
+    result = decode(make_inputs(truth, conf=0.995), CTX)
+    for rec in result.records:
+        late = rec.rows["finished_work"].dt - rec.rows["arrived_base"].dt
+        assert late <= timedelta(minutes=30)
+    # Остальная цепочка жёсткая: Начало раньше Выхода не допускается даже на минуту.
+    inputs = make_inputs(BASE_TRUTH, conf=0.995)
+    inputs["started_work.hour"] = [(9, 0.995), (10, 0.003)]
+    inputs["started_work.minute"] = [(0, 0.995), (10, 0.003)]
+    for rec in decode(inputs, CTX).records:
+        assert rec.rows["started_work"].dt >= rec.rows["left_base"].dt
+
+
+# Час вне top-k картинки: перебор всех часов и цепочка вытягивают допустимое значение.
+def test_hour_outside_image_list_is_recovered_by_chain():
+    truth: Truth = {
+        "left_base": (18, 5, 16, 50),
+        "started_work": (18, 5, 17, 30),
+        "finished_work": (18, 5, 18, 30),
+        "arrived_base": (18, 5, 18, 40),
+    }
+    inputs = make_inputs(truth, conf=0.995)
+    # Все часы из списка картинки нарушают цепочку (Выход позже Начала 17:30).
+    inputs["left_base.hour"] = [(18, 0.97), (19, 0.02)]
+    result = decode(inputs, CTX)
+    assert result.records
+    assert result.top.rows["left_base"].hour == 16
+    assert "left_base.hour" in result.overridden
+    narrow = DecoderModel.default()
+    narrow = replace(narrow, search=replace(narrow.search, all_hours=False))
+    assert decode(inputs, CTX, narrow).top.rows["left_base"].hour != 16
+
+
 # 5. Минуты 45: уверенная картинка — принимается, неуверенная — побеждает 40 или 50.
 def test_minute_45_confident_is_kept():
     inputs = make_inputs(BASE_TRUTH)
@@ -298,12 +362,13 @@ def _brute_force(inputs, context, model):
         for row in CHAIN
     }
     scored = []
+    late_max = model.priors.late_finish_max  # мягкое правило «Окончание ≤ Приход»
 
     for base in space.base_dates:
         for pattern in space.patterns:
             for combo in itertools.product(*(per_row[r] for r in CHAIN)):
                 t = [o * 1440 + h * 60 + m for o, (h, m) in zip(pattern, combo, strict=True)]
-                if t != sorted(t):
+                if not (t[0] <= t[1] <= t[2] and t[3] >= t[2] - late_max):
                     continue  # нарушение цепочки: скалярная оценка дала бы -inf
                 forms = {
                     row: (base + timedelta(days=o), h, m)
@@ -324,12 +389,11 @@ def test_matches_brute_force(seed):
         extra_minutes=(),
         top_n=12,
         min_prob=0.0,
+        all_hours=False,  # перебор по 25 часам слишком долог; ДП от этого не меняется
         max_base_dates=6,  # заодно проверяем отсечение базовых дат
     )
     priors = DecoderPriors.default()
     if seed % 3 == 0:
-        from dataclasses import replace
-
         priors = replace(priors, max_day_offset=2)
     model = DecoderModel(priors=priors, search=search).with_weights(
         day=float(rng.uniform(0.5, 1.5)), prior_duration=float(rng.uniform(0.5, 1.5))
@@ -369,6 +433,23 @@ def test_matches_brute_force(seed):
         np.testing.assert_allclose(got_m, best[: len(got_m)], atol=1e-9)
         for opt in result.marginals[row]:
             assert agg[opt.value.as_form()] == pytest.approx(opt.p, abs=1e-9)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_top1_does_not_depend_on_top_n(seed):
+    """Отсечение в k-best точное и при `top_n = 1` (порог равен самому максимуму)."""
+    rng = np.random.default_rng(100 + seed)
+    inputs, context = _random_inputs(rng)
+    model = DecoderModel.default()
+    wide = decode(inputs, context, model)
+    narrow = decode(inputs, context, replace(model, search=replace(model.search, top_n=1)))
+    if not wide.records:
+        assert not narrow.records
+        return
+    assert len(narrow.records) == 1
+    assert narrow.top.score == pytest.approx(wide.top.score, abs=1e-9)
+    assert narrow.top.forms() == wide.top.forms()
+    assert narrow.log_z == pytest.approx(wide.log_z, abs=1e-12)
 
 
 # 9. Время работы.

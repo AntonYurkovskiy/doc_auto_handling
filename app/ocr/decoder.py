@@ -11,18 +11,25 @@
 Оценка записи — сумма логарифмов:
 
 - картинка: `Σ w_part · log P_img(значение)` по 16 подполям; пропущенное подполе даёт
-  равномерное распределение, значение вне top-k — остаток массы поровну (с полом);
+  равномерное распределение, значение вне переданного списка — остаток массы поровну
+  (с полом `prob_floor`). Лучше передавать полное распределение (`predict_digits(k=60)`);
 - приоры: минуты, часы по строкам, длительности соседних участков цепочки, шаблон
   смещений дней, отклонение «Начало − время заявки» (без окна, только с полом),
   штраф за год вне контекста;
-- жёсткие правила: `Выход ≤ Начало ≤ Окончание ≤ Приход`, час 24 только с минутами 00,
-  дата валидна (получается сама — даты строятся календарной арифметикой от B).
+- жёсткие правила: `Выход ≤ Начало ≤ Окончание`, час 24 только с минутами 00, дата валидна
+  (получается сама — даты строятся календарной арифметикой от B);
+- мягкое правило `Окончание ≤ Приход` (T04: 0,5 % бланков нарушают его на 10–20 минут):
+  Приход раньше Окончания не больше чем на `late_finish_max` минут, со штрафом
+  `late_finish_logp` на минуту; дальше — запрет.
 
-Поиск. При фиксированных B и шаблоне смещений оценка раскладывается на унарные члены
-строк и парные члены соседних строк цепочки. Поэтому нормировка и маргиналы считаются
-точно (сумма-произведение по цепочке, батчем по всем B), а top-N записей — точным
-k-лучшим динамическим программированием с отсечением по верхней границе цепочки.
-Вероятности — softmax по всему перечисленному пространству кандидатов.
+Поиск. Кандидаты: базовые даты из top-k дней и месяцев, все часы 0–24 (`all_hours`: истинный
+час бывает вне top-5 картинки, его вытягивают цепочка и длительности), минуты top-k плюс
+кратные 10. При фиксированных B и шаблоне смещений оценка раскладывается на унарные члены
+строк и парные члены соседних строк цепочки, а от B зависят только постоянный сдвиг и
+строка «Начало» (приор заявки). Поэтому нормировка, маргиналы и максимум каждой цепочки
+считаются точно за O(S²) на шаблон, а top-N записей — точным k-лучшим динамическим
+программированием с точным отсечением состояний по max-маргиналам. Вероятности — softmax
+по всему перечисленному пространству кандидатов.
 
 Зависимости — только numpy и stdlib.
 """
@@ -35,6 +42,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +61,8 @@ PART_RANGE: dict[str, tuple[int, int]] = {
 # Участки цепочки: (строка-начало, строка-конец).
 LEGS: tuple[tuple[str, str], ...] = tuple(zip(CHAIN[:-1], CHAIN[1:], strict=True))
 LEG_NAMES: tuple[str, ...] = tuple(f"{a}->{b}" for a, b in LEGS)
+# Участок с мягким правилом порядка: «Окончание → Приход» (последний в цепочке).
+LATE_LEG = len(LEGS) - 1
 
 MINUTES_PER_DAY = 1440
 _NEG_INF = float("-inf")
@@ -250,6 +260,19 @@ DEFAULT_PATTERN_PROBS: dict[tuple[int, ...], float] = {
 }
 
 
+# Мягкое правило «Окончание ≤ Приход» (T04): 4 бланка из 772 (0,5 %), Приход раньше на 10–20 мин.
+DEFAULT_LATE_FINISH_MAX = 30.0
+DEFAULT_LATE_FINISH_SHARE = 0.005
+
+
+def late_finish_density(share: float, max_minutes: float) -> float:
+    """Лог-плотность на минуту для доли `share`, размазанной по `max_minutes` минутам."""
+    return math.log(share / max_minutes)
+
+
+DEFAULT_LATE_FINISH_LOGP = late_finish_density(DEFAULT_LATE_FINISH_SHARE, DEFAULT_LATE_FINISH_MAX)
+
+
 def chain_patterns(max_day_offset: int) -> list[tuple[int, ...]]:
     """Все неубывающие шаблоны смещений с `o_left = 0` и `o ≤ max_day_offset`."""
     out: list[tuple[int, ...]] = []
@@ -286,6 +309,8 @@ class DecoderPriors:
     max_day_offset: int
     app_deviation: BinnedLogDensity
     other_year_logp: float = -3.0
+    late_finish_max: float = DEFAULT_LATE_FINISH_MAX
+    late_finish_logp: float = DEFAULT_LATE_FINISH_LOGP
 
     def __post_init__(self) -> None:
         if len(self.minute_logp) != 60:
@@ -320,6 +345,19 @@ class DecoderPriors:
 
     def pattern_value(self, pattern: tuple[int, ...]) -> float:
         return self.pattern_logp.get(pattern, self.pattern_floor)
+
+    def leg_lower(self, leg: int) -> float:
+        """Наименьшая допустимая длительность участка, минуты (отрицательна у мягкого)."""
+        return -max(0.0, float(self.late_finish_max)) if leg == LATE_LEG else 0.0
+
+    def leg_logp(self, leg: int, density: BinnedLogDensity, dt: np.ndarray) -> np.ndarray:
+        """Лог-плотность длительности участка; вне допустимого — `-inf`."""
+        values = np.asarray(dt, dtype=float)
+        out = np.where(values >= 0, density(values), _NEG_INF)
+        lower = self.leg_lower(leg)
+        if lower < 0:
+            out = np.where((values < 0) & (values >= lower), self.late_finish_logp, out)
+        return out
 
     @classmethod
     def default(cls) -> DecoderPriors:
@@ -356,6 +394,8 @@ class DecoderPriors:
             "max_day_offset": self.max_day_offset,
             "app_deviation": self.app_deviation.to_json(),
             "other_year_logp": self.other_year_logp,
+            "late_finish_max": self.late_finish_max,
+            "late_finish_logp": self.late_finish_logp,
         }
 
     @classmethod
@@ -373,6 +413,8 @@ class DecoderPriors:
             max_day_offset=int(data["max_day_offset"]),
             app_deviation=BinnedLogDensity.from_json(data["app_deviation"]),
             other_year_logp=float(data.get("other_year_logp", -3.0)),
+            late_finish_max=float(data.get("late_finish_max", DEFAULT_LATE_FINISH_MAX)),
+            late_finish_logp=float(data.get("late_finish_logp", DEFAULT_LATE_FINISH_LOGP)),
         )
 
 
@@ -402,6 +444,9 @@ class SearchParams:
         default_factory=lambda: {"day": 3, "month": 2, "hour": 4, "minute": 3}
     )
     min_prob: float = 0.01
+    # Перебирать все часы 0–24 в каждой строке, а не только top-k картинки: истинный час
+    # бывает вне top-5 (T19, val), тогда его вытягивают цепочка и длительности.
+    all_hours: bool = True
     # Минуты, которые всегда добавляются в кандидаты (их поддерживает приор).
     extra_minutes: tuple[int, ...] = (0, 10, 20, 30, 40, 50)
     prob_floor: float = 1e-6
@@ -424,6 +469,7 @@ class SearchParams:
         return cls(
             top_k={**base.top_k, **{k: int(v) for k, v in data.get("top_k", {}).items()}},
             min_prob=float(data.get("min_prob", base.min_prob)),
+            all_hours=bool(data.get("all_hours", base.all_hours)),
             extra_minutes=tuple(int(v) for v in data.get("extra_minutes", base.extra_minutes)),
             prob_floor=float(data.get("prob_floor", base.prob_floor)),
             top_n=int(data.get("top_n", base.top_n)),
@@ -444,7 +490,7 @@ class DecoderModel:
 
     @classmethod
     def default(cls) -> DecoderModel:
-        return cls(priors=DecoderPriors.default(), meta={"source": "defaults_from_plan"})
+        return _default_model()
 
     def with_weights(self, **changes: float) -> DecoderModel:
         return replace(self, weights=replace(self.weights, **changes))
@@ -483,6 +529,12 @@ class DecoderModel:
         if path is None or not Path(path).exists():
             return cls.default()
         return cls.from_json(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+@lru_cache(maxsize=1)
+def _default_model() -> DecoderModel:
+    """Модель по умолчанию строится один раз: датаклассы неизменяемые."""
+    return DecoderModel(priors=DecoderPriors.default(), meta={"source": "defaults_from_plan"})
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +645,7 @@ FLAG_TOP1_DAY_MISMATCH = "fields_top1_day_mismatch"
 FLAG_APP_FAR = "app_far"
 FLAG_OTHER_YEAR = "other_year"
 FLAG_MISSING = "missing_subfields"
+FLAG_LATE_FINISH = "finished_after_arrived"
 
 
 @dataclass(frozen=True)
@@ -768,7 +821,7 @@ def _candidate_space(ev: _Evidence, context: DecodeContext, model: DecoderModel)
     for row in CHAIN:
         h_dist = ev.ranked[subfield(row, "hour")]
         m_dist = ev.ranked[subfield(row, "minute")]
-        if h_dist:
+        if h_dist and not search.all_hours:
             hs = set(_top_values(h_dist, search.top_k["hour"], search.min_prob))
         else:
             hs = set(range(25))
@@ -874,11 +927,12 @@ def _score_scalar(
         score += w.minute * float(ev.logp[subfield(row, "minute")][m])
         score += w.prior_hour * float(priors.hour_array(row)[h])
         score += w.prior_minute * float(priors.minute_array[m])
-    if any(b < a for a, b in zip(t[:-1], t[1:], strict=True)):
-        return _NEG_INF
     legs = priors.leg_densities(context.work_type)
-    for name, a, b in zip(LEG_NAMES, t[:-1], t[1:], strict=True):
-        score += w.prior_duration * float(legs[name](float(b - a)))
+    for leg, (name, a, b) in enumerate(zip(LEG_NAMES, t[:-1], t[1:], strict=True)):
+        value = float(priors.leg_logp(leg, legs[name], np.asarray(float(b - a))))
+        if not math.isfinite(value):
+            return _NEG_INF
+        score += w.prior_duration * value
     if context.app_dt is not None:
         start = datetime.combine(base, time()) + timedelta(minutes=t[1])
         dev = (start - context.app_dt).total_seconds() / 60.0
@@ -900,30 +954,78 @@ def score_record(
 # ---------------------------------------------------------------------------
 # Поиск по цепочке
 # ---------------------------------------------------------------------------
+#
+# Цепочка строк: Выход (0) → Начало (1) → Окончание (2) → Приход (3). При фиксированном
+# шаблоне смещений от базовой даты B зависят только постоянный сдвиг (оценка дат, шаблон,
+# год) и унарный член строки «Начало» (приор заявки). Поэтому шаги от «Выхода» и от
+# «Прихода» считаются один раз на шаблон, а по B — только строка «Начало»: так точные
+# нормировка, маргиналы и максимум цепочки стоят O(S²) на шаблон, а не на каждую B.
 
 
-def _lse_step(alpha: np.ndarray, pair: np.ndarray) -> np.ndarray:
-    """`out[b, j] = logsumexp_i(alpha[b, i] + pair[i, j])` через матричное умножение."""
-    m = alpha.max(axis=1, keepdims=True)
-    m = np.where(np.isfinite(m), m, 0.0)
-    c = pair.max(axis=0, keepdims=True)
-    c = np.where(np.isfinite(c), c, 0.0)
+class _Pair:
+    """Парная матрица участка `(S_a, S_b)` и её экспонента для матричных шагов.
+
+    Конечные значения матрицы лежат в пределах `вес · log(пол плотности)` (десятки нат),
+    поэтому хватает одного скалярного сдвига: `exp(P − max P)` не теряет точности.
+    """
+
+    def __init__(self, logp: np.ndarray) -> None:
+        self.logp = logp
+        self._exp: tuple[np.ndarray, float] | None = None
+
+    def exp(self) -> tuple[np.ndarray, float]:
+        if self._exp is None:
+            finite = self.logp[np.isfinite(self.logp)]
+            m = float(finite.max()) if finite.size else 0.0
+            with np.errstate(under="ignore"):
+                self._exp = (np.exp(self.logp - m), m)
+        return self._exp
+
+
+def _shift_of(values: np.ndarray) -> np.ndarray:
+    m = values.max(axis=-1, keepdims=True)
+    return np.where(np.isfinite(m), m, 0.0)
+
+
+def _lse_forward(a: np.ndarray, pair: _Pair) -> np.ndarray:
+    """`out[..., j] = logsumexp_i(a[..., i] + P[i, j])`; `a` — `(S_a,)` или `(nB, S_a)`."""
+    e, c = pair.exp()
+    m = _shift_of(a)
     with np.errstate(divide="ignore", under="ignore"):
-        prod = np.exp(alpha - m) @ np.exp(pair - c)
-        return np.log(prod) + m + c
+        return np.log(np.exp(a - m) @ e) + m + c
 
 
-def _max_step(alpha: np.ndarray, pair: np.ndarray) -> np.ndarray:
-    return (alpha[:, :, None] + pair[None, :, :]).max(axis=1)
+def _lse_backward(pair: _Pair, b: np.ndarray) -> np.ndarray:
+    """`out[..., i] = logsumexp_j(P[i, j] + b[..., j])`; `b` — `(S_b,)` или `(nB, S_b)`."""
+    e, c = pair.exp()
+    m = _shift_of(b)
+    with np.errstate(divide="ignore", under="ignore"):
+        return np.log(np.exp(b - m) @ e.T) + m + c
 
 
-def _logsumexp(values: np.ndarray) -> float:
-    if values.size == 0:
-        return _NEG_INF
-    m = float(np.max(values))
-    if not math.isfinite(m):
-        return _NEG_INF
-    return m + math.log(float(np.sum(np.exp(values - m))))
+def _max_forward(a: np.ndarray, pair: _Pair) -> np.ndarray:
+    """`out[j] = max_i(a[i] + P[i, j])`."""
+    return (a[:, None] + pair.logp).max(axis=0)
+
+
+def _max_backward(pair: _Pair, b: np.ndarray) -> np.ndarray:
+    """`out[i] = max_j(P[i, j] + b[j])`."""
+    return (pair.logp + b[None, :]).max(axis=1)
+
+
+def _logsumexp(values: np.ndarray, axis: int | None = None) -> Any:
+    if axis is None:
+        if values.size == 0:
+            return _NEG_INF
+        m = float(np.max(values))
+        if not math.isfinite(m):
+            return _NEG_INF
+        return m + math.log(float(np.sum(np.exp(values - m))))
+    m = np.max(values, axis=axis, keepdims=True)
+    safe = np.where(np.isfinite(m), m, 0.0)
+    with np.errstate(divide="ignore", under="ignore"):
+        out = np.log(np.sum(np.exp(values - safe), axis=axis, keepdims=True)) + safe
+    return np.squeeze(np.where(np.isfinite(m), out, _NEG_INF), axis=axis)
 
 
 def _kbest_chain(
@@ -967,21 +1069,126 @@ def _kbest_chain(
 
 
 @dataclass
-class _PatternBatch:
+class _PatternChain:
+    """Шаблон смещений: парные матрицы и B-независимые шаги сумма-произведения и максимума.
+
+    `shift` — `(nB,)` постоянная часть оценки по B (даты, шаблон, год), `start` — `(nB, S1)`
+    унарный член строки «Начало» с приором заявки. `f1`/`g1`/`g2` — шаги логсуммы вперёд
+    от «Выхода» и назад от «Прихода», `fm1`/`gm1`/`gm2` — то же для максимума.
+    """
+
     pattern: tuple[int, ...]
-    unaries: list[np.ndarray]  # по строкам CHAIN, (nB, S_r), дата уже в первой строке
-    pairs: list[np.ndarray]  # (S_r, S_{r+1})
-    alphas: list[np.ndarray]
-    betas: list[np.ndarray]
+    pairs: tuple[_Pair, _Pair, _Pair]
+    shift: np.ndarray
+    start: np.ndarray
+    f1: np.ndarray
+    g1: np.ndarray
+    g2: np.ndarray
+    fm1: np.ndarray
+    gm1: np.ndarray
+    gm2: np.ndarray
     log_z: np.ndarray  # (nB,)
-    best: np.ndarray  # (nB,)
+    best: np.ndarray  # (nB,) точный максимум цепочки
 
 
-def _pair_matrix(
-    density: BinnedLogDensity, weight: float, t_prev: np.ndarray, t_next: np.ndarray
-) -> np.ndarray:
-    dt = t_next[None, :] - t_prev[:, None]
-    return np.where(dt >= 0, weight * density(dt.astype(float)), _NEG_INF)
+def _leg_table(
+    priors: DecoderPriors, leg: int, density: BinnedLogDensity, weight: float, max_off: int
+) -> tuple[np.ndarray, int]:
+    """Взвешенная лог-плотность участка на целых минутах `[−1440, 1440·(max_off + 1)]`."""
+    lo = -MINUTES_PER_DAY
+    dt = np.arange(lo, MINUTES_PER_DAY * (max_off + 1) + 1, dtype=float)
+    logp = priors.leg_logp(leg, density, dt)
+    return np.where(np.isfinite(logp), weight * logp, _NEG_INF), lo
+
+
+def _chain_margins(
+    chain: _PatternChain, b: int, unary: Sequence[np.ndarray]
+) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+    """Унарные члены цепочки (шаблон, B) и точные max-маргиналы её состояний по строкам.
+
+    Max-маргинал состояния — оценка лучшего пути через него.
+    """
+    p01, p12, p23 = chain.pairs
+    us = (unary[0] + chain.shift[b], unary[1] + chain.start[b], unary[2], unary[3])
+    a1 = chain.shift[b] + chain.fm1 + us[1]
+    a2 = _max_forward(a1, p12) + us[2]
+    a3 = _max_forward(a2, p23) + us[3]
+    b0 = _max_backward(p01, us[1] + chain.gm1)
+    return us, (us[0] + b0, a1 + chain.gm1, a2 + chain.gm2, a3)
+
+
+# Допуск сравнения оценок в отсечении k-best, нат: max-маргиналы одного пути, посчитанные
+# с разным порядком суммирования, расходятся на ~1e-12 — без допуска лучший путь отсекается.
+_PRUNE_TOL = 1e-6
+
+
+def _nth_largest(values: np.ndarray, n: int) -> float:
+    if values.size < n:
+        return _NEG_INF
+    return float(np.partition(values, values.size - n)[values.size - n])
+
+
+def _chain_kbest(
+    chain: _PatternChain,
+    us: Sequence[np.ndarray],
+    marg: Sequence[np.ndarray],
+    k: int,
+    threshold: float,
+) -> list[tuple[float, tuple[int, ...]]]:
+    """K лучших путей цепочки среди состояний с max-маргиналом ≥ `threshold`."""
+    keep = [np.flatnonzero(m >= threshold) for m in marg]
+    if any(idx.size == 0 for idx in keep):
+        return []
+    sub_u = [u[idx] for u, idx in zip(us, keep, strict=True)]
+    sub_p = [pair.logp[np.ix_(keep[i], keep[i + 1])] for i, pair in enumerate(chain.pairs)]
+    out = []
+    for value, path in _kbest_chain(sub_u, sub_p, k):
+        out.append((value, tuple(int(keep[i][s]) for i, s in enumerate(path))))
+    return out
+
+
+def _top_paths(
+    chains: Sequence[_PatternChain], unary: Sequence[np.ndarray], n: int
+) -> list[tuple[float, int, int, tuple[int, ...]]]:
+    """Точные top-N путей по всем цепочкам: `(оценка, шаблон, B, состояния строк)`.
+
+    Цепочки идут по убыванию точного максимума. Отсечение состояний точное: в любой строке
+    лучшей цепочки N лучших max-маргиналов — это N разных путей, поэтому N-е из них — нижняя
+    граница N-й лучшей записи; дальше порог поднимается до худшей записи в куче.
+    """
+    order = sorted(
+        (
+            (float(chain.best[b]), ci, b)
+            for ci, chain in enumerate(chains)
+            for b in range(chain.best.shape[0])
+            if math.isfinite(chain.best[b])
+        ),
+        key=lambda x: -x[0],
+    )
+    if not order or n <= 0:
+        return []
+    heap: list[tuple[float, int, tuple[int, int, tuple[int, ...]]]] = []
+    counter = 0
+    bound = _NEG_INF
+    for rank, (best, ci, b) in enumerate(order):
+        full = len(heap) >= n
+        if full and best < heap[0][0]:
+            break
+        us, marg = _chain_margins(chains[ci], b, unary)
+        if rank == 0:
+            bound = max(_nth_largest(m[np.isfinite(m)], n) for m in marg)
+        cut = (max(bound, heap[0][0]) if full else bound) - _PRUNE_TOL
+        for value, path in _chain_kbest(chains[ci], us, marg, n, cut):
+            item = (value, -counter, (ci, b, path))
+            counter += 1
+            if len(heap) < n:
+                heapq.heappush(heap, item)
+            elif value > heap[0][0]:
+                heapq.heapreplace(heap, item)
+            else:
+                break
+    ranked = sorted(heap, key=lambda x: (-x[0], -x[1]))
+    return [(value, ci, b, path) for value, _, (ci, b, path) in ranked]
 
 
 def _argmax_forms(ev: _Evidence, year: int) -> tuple[dict[str, int], list[str]]:
@@ -1025,8 +1232,9 @@ def decode(
     """Найти top-N записей ваучера по распределениям подполей.
 
     `inputs` — формат `runtime.predict_digits`: `{подполе: [(значение, вероятность), …]}`,
-    например `{"left_base.hour": [(9, 0.93), (8, 0.05)]}`. Отсутствующее подполе или
-    пустой список — пропуск (равномерное распределение).
+    например `{"left_base.hour": [(9, 0.93), (8, 0.05)]}`. Можно top-5 (как в JSONL T13), можно
+    полное распределение (`predict_digits(..., k=60)`). Отсутствующее подполе или пустой
+    список — пропуск (равномерное распределение).
     """
     model = model or DecoderModel.default()
     search = model.search
@@ -1062,10 +1270,10 @@ def decode(
     if any(states[row][0].size == 0 for row in CHAIN):
         return empty(FLAG_NO_CANDIDATES)
     base_t = {row: states[row][0] * 60 + states[row][1] for row in CHAIN}
-    unary: dict[str, np.ndarray] = {}
+    unary: list[np.ndarray] = []
     for row in CHAIN:
         hs, ms = states[row]
-        unary[row] = (
+        unary.append(
             w.hour * ev.logp[subfield(row, "hour")][hs]
             + w.minute * ev.logp[subfield(row, "minute")][ms]
             + w.prior_hour * priors.hour_array(row)[hs]
@@ -1083,8 +1291,9 @@ def decode(
         [0.0 if b.year == context.year else priors.other_year_logp for b in bases]
     )
 
-    # Приор заявки для строки «Начало»: (nB, S) по смещению.
+    # Приор заявки для строки «Начало»: (nB, S1) по смещению.
     start_row = CHAIN[1]
+    no_app = np.zeros((n_b, base_t[start_row].size))
     app_term: dict[int, np.ndarray] = {}
     if context.app_dt is not None:
         app_min = (
@@ -1097,99 +1306,66 @@ def decode(
             dev = app_min[:, None] + o * MINUTES_PER_DAY + base_t[start_row][None, :]
             app_term[o] = w.prior_app * priors.app_deviation(dev)
 
+    # Парные матрицы участков: таблица плотности на целых минутах и выборка по разностям.
     legs = priors.leg_densities(context.work_type)
-    pair_cache: dict[tuple[int, int], np.ndarray] = {}
+    tables = {
+        leg: _leg_table(priors, leg, legs[LEG_NAMES[leg]], w.prior_duration, max_off)
+        for leg in range(len(LEGS))
+    }
+    pair_cache: dict[tuple[int, int], _Pair] = {}
 
-    def pair(leg: int, diff: int) -> np.ndarray:
+    def pair(leg: int, diff: int) -> _Pair:
         key = (leg, diff)
         if key not in pair_cache:
             a, b = LEGS[leg]
-            pair_cache[key] = _pair_matrix(
-                legs[LEG_NAMES[leg]],
-                w.prior_duration,
-                base_t[a],
-                base_t[b] + diff * MINUTES_PER_DAY,
-            )
+            table, lo = tables[leg]
+            dt = base_t[b][None, :] + diff * MINUTES_PER_DAY - base_t[a][:, None]
+            pair_cache[key] = _Pair(table[dt - lo])
         return pair_cache[key]
 
-    batches: list[_PatternBatch] = []
+    u0, u1, u2, u3 = unary
+    chains: list[_PatternChain] = []
     for pattern in space.patterns:
-        d_score = w.prior_pattern * priors.pattern_value(pattern) + year_term
+        shift = w.prior_pattern * priors.pattern_value(pattern) + year_term
         for row, o in zip(CHAIN, pattern, strict=True):
-            d_score = d_score + date_score[(row, o)]
-        unaries: list[np.ndarray] = []
-        for i, (row, o) in enumerate(zip(CHAIN, pattern, strict=True)):
-            u = np.broadcast_to(unary[row], (n_b, unary[row].shape[0])).copy()
-            if i == 0:
-                u += d_score[:, None]
-            if row == start_row and o in app_term:
-                u += app_term[o]
-            unaries.append(u)
-        pairs = [pair(i, pattern[i + 1] - pattern[i]) for i in range(len(LEGS))]
-        alphas = [unaries[0]]
-        maxes = unaries[0]
-        for p_mat, u in zip(pairs, unaries[1:], strict=True):
-            alphas.append(_lse_step(alphas[-1], p_mat) + u)
-            maxes = _max_step(maxes, p_mat) + u
-        betas = [np.zeros_like(unaries[-1])]
-        for p_mat, u in zip(reversed(pairs), reversed(unaries[1:]), strict=True):
-            betas.append(_lse_step(u + betas[-1], p_mat.T))
-        betas.reverse()
-        with np.errstate(under="ignore", divide="ignore"):
-            last = alphas[-1]
-            m = last.max(axis=1)
-            safe = np.where(np.isfinite(m), m, 0.0)
-            log_z_b = np.log(np.exp(last - safe[:, None]).sum(axis=1)) + safe
-        batches.append(
-            _PatternBatch(
+            shift = shift + date_score[(row, o)]
+        p01, p12, p23 = (pair(i, pattern[i + 1] - pattern[i]) for i in range(len(LEGS)))
+        start = app_term.get(pattern[1], no_app)
+        f1 = _lse_forward(u0, p01)
+        g2 = _lse_backward(p23, u3)
+        g1 = _lse_backward(p12, u2 + g2)
+        fm1 = _max_forward(u0, p01)
+        gm2 = _max_backward(p23, u3)
+        gm1 = _max_backward(p12, u2 + gm2)
+        core = shift[:, None] + u1 + start
+        chains.append(
+            _PatternChain(
                 pattern=pattern,
-                unaries=unaries,
-                pairs=pairs,
-                alphas=alphas,
-                betas=betas,
-                log_z=np.where(np.isfinite(m), log_z_b, _NEG_INF),
-                best=maxes.max(axis=1),
+                pairs=(p01, p12, p23),
+                shift=shift,
+                start=start,
+                f1=f1,
+                g1=g1,
+                g2=g2,
+                fm1=fm1,
+                gm1=gm1,
+                gm2=gm2,
+                log_z=_logsumexp(core + f1 + g1, axis=1),
+                best=(core + fm1 + gm1).max(axis=1),
             )
         )
 
-    log_z = _logsumexp(np.concatenate([b.log_z for b in batches]))
+    log_z = _logsumexp(np.concatenate([c.log_z for c in chains]))
     if not math.isfinite(log_z):
         return empty(FLAG_NO_CANDIDATES)
-
-    # Top-N: цепочки (шаблон, B) по убыванию точного максимума, отсечение по N-й оценке.
-    chains = sorted(
-        (
-            (float(batch.best[b]), pi, b)
-            for pi, batch in enumerate(batches)
-            for b in range(n_b)
-            if math.isfinite(batch.best[b])
-        ),
-        key=lambda x: -x[0],
-    )
-    heap: list[tuple[float, int, tuple[int, int, tuple[int, ...]]]] = []
-    counter = 0
-    for best, pi, b in chains:
-        if len(heap) >= search.top_n and best < heap[0][0]:
-            break
-        batch = batches[pi]
-        for value, path in _kbest_chain([u[b] for u in batch.unaries], batch.pairs, search.top_n):
-            item = (value, -counter, (pi, b, path))
-            counter += 1
-            if len(heap) < search.top_n:
-                heapq.heappush(heap, item)
-            elif value > heap[0][0]:
-                heapq.heapreplace(heap, item)
-            else:
-                break
-    ranked = sorted(heap, key=lambda x: (-x[0], -x[1]))
 
     def make_row(row: str, b: int, o: int, s: int) -> RowValue:
         hs, ms = states[row]
         return RowValue(bases[b] + timedelta(days=o), int(hs[s]), int(ms[s]))
 
     records: list[Record] = []
-    for value, _, (pi, b, path) in ranked:
-        pattern = batches[pi].pattern
+    for value, ci, b, path in _top_paths(chains, unary, search.top_n):
+        pattern = chains[ci].pattern
         rows = {row: make_row(row, b, o, s) for row, o, s in zip(CHAIN, pattern, path, strict=True)}
         records.append(
             Record(
@@ -1198,8 +1374,10 @@ def decode(
                 p=math.exp(value - log_z),
             )
         )
+    if not records:
+        return empty(FLAG_NO_CANDIDATES)
 
-    marginals = _marginals(batches, states, base_ord, log_z, search.marginal_top)
+    marginals = _marginals(chains, unary, states, base_ord, log_z, search.marginal_top)
 
     top = records[0]
     p1 = top.p
@@ -1209,6 +1387,8 @@ def decode(
         flags.add(FLAG_CROSSES_MIDNIGHT)
     if top.hour24:
         flags.add(FLAG_HOUR24)
+    if top.rows["arrived_base"].dt < top.rows["finished_work"].dt:
+        flags.add(FLAG_LATE_FINISH)
     if any(top.rows[r].minute % 10 for r in ROWS):
         flags.add(FLAG_MINUTE_NOT_MULT10)
     if top.rows[CHAIN[0]].form_date.year != context.year:
@@ -1241,42 +1421,53 @@ def decode(
 
 
 def _marginals(
-    batches: Sequence[_PatternBatch],
+    chains: Sequence[_PatternChain],
+    unary: Sequence[np.ndarray],
     states: Mapping[str, tuple[np.ndarray, np.ndarray]],
     base_ord: np.ndarray,
     log_z: float,
     top: int,
 ) -> dict[str, tuple[RowOption, ...]]:
-    """Маргинальные top-N значений каждой строки (по написанию на бланке)."""
-    out: dict[str, tuple[RowOption, ...]] = {}
-    for ri, row in enumerate(CHAIN):
-        hs, ms = states[row]
-        keys: list[np.ndarray] = []
-        probs: list[np.ndarray] = []
-        for batch in batches:
-            o = batch.pattern[ri]
+    """Маргинальные top-N значений каждой строки (по написанию на бланке).
+
+    Вероятности строк копятся в плотном массиве «дата на бланке × состояние»: у строки с
+    смещением `o` дата — `B + o`, и разные шаблоны с одной датой складываются.
+    """
+    max_off = max(c.pattern[-1] for c in chains)
+    written = np.unique(np.concatenate([base_ord + o for o in range(max_off + 1)]))
+    pos = {o: np.searchsorted(written, base_ord + o) for o in range(max_off + 1)}
+    acc = [np.zeros((written.size, u.size)) for u in unary]
+    u0, u1, u2, u3 = unary
+    for c in chains:
+        p01, p12, p23 = c.pairs
+        start_u = u1 + c.start  # (nB, S1)
+        core = c.shift[:, None] + c.f1 + start_u  # α строки «Начало»
+        alpha2 = _lse_forward(core, p12) + u2
+        alpha3 = _lse_forward(alpha2, p23) + u3
+        logs = (
+            c.shift[:, None] + u0 + _lse_backward(p01, start_u + c.g1),
+            core + c.g1,
+            alpha2 + c.g2,
+            alpha3,
+        )
+        for r, (o, lg) in enumerate(zip(c.pattern, logs, strict=True)):
             with np.errstate(under="ignore", invalid="ignore"):
-                prob = np.exp(batch.alphas[ri] + batch.betas[ri] - log_z)
-            prob = np.nan_to_num(prob, nan=0.0)
-            # Ключ — написание: (порядковый номер даты на бланке, час, минута).
-            written_ord = base_ord[:, None] + o
-            key = (written_ord * 25 + hs[None, :]) * 60 + ms[None, :]
-            keys.append(key.ravel())
-            probs.append(prob.ravel())
-        all_keys = np.concatenate(keys)
-        all_probs = np.concatenate(probs)
-        uniq, inv = np.unique(all_keys, return_inverse=True)
-        summed = np.bincount(inv, weights=all_probs, minlength=uniq.size)
-        order = np.argsort(-summed, kind="stable")[:top]
+                prob = np.exp(lg - log_z)
+            acc[r][pos[o]] += np.nan_to_num(prob, nan=0.0)
+    out: dict[str, tuple[RowOption, ...]] = {}
+    for r, row in enumerate(CHAIN):
+        hs, ms = states[row]
+        flat = acc[r].ravel()
+        k = min(top, flat.size)
+        idx = np.argpartition(-flat, k - 1)[:k] if k < flat.size else np.arange(flat.size)
+        idx = idx[np.argsort(-flat[idx], kind="stable")]
         options: list[RowOption] = []
-        for i in order:
-            if summed[i] <= 0:
+        for i in idx:
+            if flat[i] <= 0:
                 continue
-            key = int(uniq[i])
-            rest, minute = divmod(key, 60)
-            day_ord, hour = divmod(rest, 25)
-            value = RowValue(date.fromordinal(day_ord), hour, minute)
-            options.append(RowOption(value=value, p=float(summed[i])))
+            d_i, s = divmod(int(i), acc[r].shape[1])
+            value = RowValue(date.fromordinal(int(written[d_i])), int(hs[s]), int(ms[s]))
+            options.append(RowOption(value=value, p=float(flat[i])))
         out[row] = tuple(options)
     return {r: out[r] for r in ROWS}
 
