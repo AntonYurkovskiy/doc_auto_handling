@@ -38,7 +38,9 @@
    `export OCR_WORK_DIR=$HOME/ocr_data OCR_CACHE_DIR=$HOME/ocr_data/cache PYTHONPATH=.`.
 3. Зависимости, если их не поставил setup-скрипт:
    `pip install -r requirements.txt -r requirements-dev.txt`, затем
-   `pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.1 torchvision==0.22.1`,
+   `pip install --index-url https://download.pytorch.org/whl/cpu torch==2.7.1 torchvision==0.22.1`
+   (если `download.pytorch.org` недоступен — `pip install torch==2.7.1 torchvision==0.22.1` с PyPI:
+   сборка с CUDA, тяжелее, но на CPU работает; отметь это в журнале),
    `pip install onnx onnxruntime matplotlib scikit-learn`. Проверь
    `python -c "import torch, torchvision, numpy"` и `OCR_WORK_DIR=... python -m ocr_lab.evaluate --help`.
    Каждую доустановленную зависимость запиши в журнал (в `requirements*.txt` добавляй только
