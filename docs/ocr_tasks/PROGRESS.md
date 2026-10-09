@@ -1825,8 +1825,8 @@
     срезать `scan_id` при чтении индекса кропов в `ocr_lab/dataset.build_samples` и
     `ocr_lab/train_digits.split_crops`, затем перепрогнать `predict`/`evaluate` для
     `digits_v0` на `test` (сейчас скан там считается непокрытым).
-  - Влить ветки `claude/blissful-ritchie-b1je4r` (код и данные) в `ocr/handwritten-dates` и
-    `main` репозитория данных — следующая облачная задача (T18) ищет `number_v0` там.
+  - ~~Влить ветки `claude/blissful-ritchie-b1je4r` в `ocr/handwritten-dates` и `main`
+    репозитория данных~~ — сделано по просьбе человека (fast-forward, без merge-коммитов).
 - Для следующих задач:
   - **T18:** `ocr_lab.train_number.load_model(Path(".../number_v0"))` → `(NumberCRNN,
     TrainConfig, state)`; вход `(B, 1, 64, 176)` в `0..1` (канва
@@ -1843,8 +1843,8 @@
     ±15 вокруг ожидаемого номера их отсекает.
   - Слабые места: печатный мелкий шрифт Коммунара 2026 г. (в `train` печатных номеров 82, и
     почти все — из другого периода), повторы цифр («55») у CTC, стилизованная «2».
-  - Артефакты в репозитории данных (`AntonYurkovskiy/doc_auto_handling-data`, ветка
-    `claude/blissful-ritchie-b1je4r`): `models/number_v0/best.pt` (46,7 МБ), `config.json`,
+  - Артефакты в репозитории данных (`AntonYurkovskiy/doc_auto_handling-data`, ветка `main`,
+    влита из `claude/blissful-ritchie-b1je4r`): `models/number_v0/best.pt` (46,7 МБ), `config.json`,
     `history.csv`, `train.log`, `{val,test}_predictions.jsonl` (11/21 КБ),
     `{val,test}_outputs.npz` (44/84 КБ); `models/number_runs/{A_heads_synth,B_ctc_synth}/` —
     `config.json`, `history.csv`, `train.log`, `val_*` (без чекпоинтов: `last.pt` — 129/140 МБ,
