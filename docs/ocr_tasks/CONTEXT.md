@@ -366,3 +366,7 @@
   `data/ocr/crops_index.csv` (769 сканов × 17, пути относительно `data/ocr/`), отказы выравнивания —
   `data/ocr/reports/align_failures.csv` (3). Нарезка воспроизводима: `ocr_lab.cut_crops` фиксирует
   `cv2.setRNGSeed(0)` перед `align`. Макеты Пионера — `version` 2 (минуты шире на 24 px).
+- **2026-10-09 (T16):** в `.venv-train` стоит `torchvision 0.22.1+cu126`; зависимости обучения
+  теперь в `requirements-train.txt`. Кэши моделей — `OCR_CACHE_DIR=E:\ocr_cache` (`torch/` —
+  веса ImageNet, `mnist/` — MNIST, `hf/`). Модель цифр — `data/ocr/models/digits_v0/`
+  (ResNet18, пик VRAM 2,4 ГБ при батче 128). `mypy` в `.venv-train` нет — запускать из `.venv`.
