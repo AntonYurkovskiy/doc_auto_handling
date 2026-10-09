@@ -6,3 +6,6 @@
 torch==2.7.1
 # T16: бэкбоны ResNet18 / MobileNetV3-Small с весами ImageNet и загрузка MNIST.
 torchvision==0.22.1
+# T18: экспорт в ONNX (torch.onnx.export) и диаграммы надёжности калибровки.
+onnx==1.23.2
+matplotlib==3.11.2

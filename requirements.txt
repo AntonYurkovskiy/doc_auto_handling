@@ -19,3 +19,4 @@ torch==2.5.1
 transformers==4.46.3
 numpy==2.4.6
 opencv-python-headless==5.0.0.93
+onnxruntime==1.29.0  # OCR T18: рантайм моделей цифр и номера на CPU (app/ocr/runtime.py)

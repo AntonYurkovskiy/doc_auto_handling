@@ -370,3 +370,9 @@
   теперь в `requirements-train.txt`. Кэши моделей — `OCR_CACHE_DIR=E:\ocr_cache` (`torch/` —
   веса ImageNet, `mnist/` — MNIST, `hf/`). Модель цифр — `data/ocr/models/digits_v0/`
   (ResNet18, пик VRAM 2,4 ГБ при батче 128). `mypy` в `.venv-train` нет — запускать из `.venv`.
+- **2026-10-09 (T18):** рантайм моделей — `app/ocr/runtime.py` (onnxruntime, без torch), модели —
+  `data/ocr/models/{digits_v0,number_v0}/{model.onnx,meta.json}`; каталог переопределяется
+  `OCR_MODELS_DIR`, потоки — `OCR_ORT_THREADS`. Numpy-функции распределения значений и оценки номера
+  теперь в `app/ocr/{digit_values,number_scores}.py` (`ocr_lab.*` — реэкспорт). `onnxruntime==1.29.0` —
+  в `requirements.txt`, `onnx`/`matplotlib` — в `requirements-train.txt`. В облаке `mypy` на numpy 2.5
+  запускать с `--python-version 3.13`.

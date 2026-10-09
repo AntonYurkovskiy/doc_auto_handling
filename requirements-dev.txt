@@ -5,3 +5,4 @@ ruff==0.8.4
 mypy==1.14.0
 types-requests==2.32.0.20241016
 types-python-dateutil==2.9.0.20241206
+onnx==1.23.2  # OCR T18: тесты рантайма собирают крошечную ONNX-модель
