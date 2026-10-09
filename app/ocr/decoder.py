@@ -1382,7 +1382,40 @@ def decode(
     top = records[0]
     p1 = top.p
     p2 = records[1].p if len(records) > 1 else 0.0
-    flags = set(base_flags)
+    record_flags, overridden = _record_flags(top, top_fields, context)
+    return DecodeResult(
+        records=tuple(records),
+        confidence=p1,
+        margin=p1 - p2,
+        marginals=marginals,
+        flags=tuple(sorted({*base_flags, *record_flags})),
+        missing=ev.missing,
+        overridden=overridden,
+        log_z=log_z,
+    )
+
+
+# Флаги, которые зависят от выбранной записи (а не только от входов): их пересчитывает
+# `rerank_result`, когда лучшую запись меняет внешний член (пара ваучеров, T20).
+RECORD_FLAGS: frozenset[str] = frozenset(
+    {
+        FLAG_CROSSES_MIDNIGHT,
+        FLAG_HOUR24,
+        FLAG_LATE_FINISH,
+        FLAG_MINUTE_NOT_MULT10,
+        FLAG_OTHER_YEAR,
+        FLAG_APP_FAR,
+        FLAG_TOP1_DAY_MISMATCH,
+        FLAG_OVERRIDE,
+    }
+)
+
+
+def _record_flags(
+    top: Record, top_fields: Mapping[str, int], context: DecodeContext
+) -> tuple[set[str], tuple[str, ...]]:
+    """Флаги лучшей записи и подполя, где она расходится с top-1 картинки."""
+    flags: set[str] = set()
     if any(top.rows[r].form_date != top.rows[CHAIN[0]].form_date for r in CHAIN):
         flags.add(FLAG_CROSSES_MIDNIGHT)
     if top.hour24:
@@ -1394,7 +1427,7 @@ def decode(
     if top.rows[CHAIN[0]].form_date.year != context.year:
         flags.add(FLAG_OTHER_YEAR)
     if context.app_dt is not None:
-        dev = abs((top.rows[start_row].dt - context.app_dt).total_seconds()) / 60.0
+        dev = abs((top.rows[CHAIN[1]].dt - context.app_dt).total_seconds()) / 60.0
         if dev > MINUTES_PER_DAY:
             flags.add(FLAG_APP_FAR)
     overridden: list[str] = []
@@ -1408,15 +1441,49 @@ def decode(
         flags.add(FLAG_TOP1_DAY_MISMATCH)
     if overridden:
         flags.add(FLAG_OVERRIDE)
-    return DecodeResult(
+    return flags, tuple(overridden)
+
+
+def record_from_forms(forms: Mapping[str, FormRow], score: float, p: float = 0.0) -> Record:
+    """Запись из написания бланка (например, подтверждённый ваучер или истина)."""
+    rows = {r: RowValue(forms[r][0], int(forms[r][1]), int(forms[r][2])) for r in ROWS}
+    return Record(rows=rows, score=score, p=p)
+
+
+def rerank_result(
+    result: DecodeResult,
+    records: Sequence[Record],
+    inputs: DecoderInputs,
+    context: DecodeContext,
+    *,
+    extra_flags: Sequence[str] = (),
+) -> DecodeResult:
+    """Тот же результат декодирования с другим списком записей (уже с новыми `p`).
+
+    Флаги лучшей записи и `overridden` пересчитываются, флаги входов (top-1 картинки,
+    пропуски) остаются. Маргиналы строк — от ядра: внешний член их не пересчитывает.
+    """
+    base = {f for f in result.flags if f not in RECORD_FLAGS and f != FLAG_NO_CANDIDATES}
+    if not records:
+        return replace(
+            result,
+            records=(),
+            confidence=0.0,
+            margin=0.0,
+            flags=tuple(sorted({*base, FLAG_NO_CANDIDATES, *extra_flags})),
+            overridden=(),
+        )
+    ev = _evidence(inputs, DecoderModel.default().search.prob_floor)
+    top_fields, _ = _argmax_forms(ev, context.year)
+    flags, overridden = _record_flags(records[0], top_fields, context)
+    p2 = records[1].p if len(records) > 1 else 0.0
+    return replace(
+        result,
         records=tuple(records),
-        confidence=p1,
-        margin=p1 - p2,
-        marginals=marginals,
-        flags=tuple(sorted(flags)),
-        missing=ev.missing,
-        overridden=tuple(overridden),
-        log_z=log_z,
+        confidence=records[0].p,
+        margin=records[0].p - p2,
+        flags=tuple(sorted({*base, *flags, *extra_flags})),
+        overridden=overridden,
     )
 
 
