@@ -16,7 +16,7 @@ claude_effort: high
 devin_model: —
 review: human
 human_checkpoint: —
-max_turns: 150
+max_turns: 300
 optional: false
 ---
 

@@ -527,3 +527,23 @@ def test_final_row_count_excludes_third_tug_and_duplicates(
     assert report.total_rows_with_scan == len(ROWS)
     assert len(df) == len(ROWS) - 1 - 1 - 1
     assert report.n_final == len(df)
+
+
+@pytest.mark.parametrize("status", ["CONFIRMED", "Confirmed", " confirmed "])
+def test_load_corrections_status_is_case_insensitive(tmp_path: Path, status: str) -> None:
+    path = tmp_path / "truth_corrections.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CORRECTIONS_COLUMNS)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "scan_id": "2025_1k",
+                "field": "arrived_base",
+                "export_value": "a",
+                "corrected_value": "b",
+                "status": status,
+                "source": "x",
+                "note": "",
+            }
+        )
+    assert ("2025_1k", "arrived_base") in load_corrections(path)

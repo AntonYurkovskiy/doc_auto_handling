@@ -11,7 +11,9 @@
     python docs/ocr_tasks/run_task.py T02
     python docs/ocr_tasks/run_task.py --all --dry-run          # очередь всех готовых задач
     python docs/ocr_tasks/run_task.py --all                    # выполнить очередь последовательно
-    python docs/ocr_tasks/run_task.py T03 --channel devin
+    python docs/ocr_tasks/run_task.py T03 --channel devin       # те же модели, что у Claude
+    python docs/ocr_tasks/run_task.py T03 --channel devin --devin-models header   # SWE-2 из шапки
+    python docs/ocr_tasks/run_task.py --devin-check             # проверка подписки и связи Devin
     python docs/ocr_tasks/run_task.py T16 --effort xhigh
     python docs/ocr_tasks/run_task.py T06 --review
     python docs/ocr_tasks/run_task.py T06 --fix
@@ -23,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import copy
 import functools
@@ -35,11 +38,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 TASKS_DIR = Path(__file__).resolve().parent
 PROMPTS_DIR = TASKS_DIR / "prompts"
@@ -79,6 +82,29 @@ DEVIN_PERMISSION_MODE = "dangerous"
 IDLE_TIMEOUT_CODE = 124
 # Сторож: сколько минут без единой строки вывода считать сессию зависшей (0 — выключен).
 DEFAULT_IDLE_TIMEOUT_MIN = 40.0
+# У Devin в выводе только текст агента, без событий инструментов: долгая работа молча
+# (обучение в фоне, 10–40 мин на запуск) неотличима от зависания, и сторож убил бы живую
+# сессию (так оборвалась T16 в 00:59, ровно через 40 мин после последнего текста в 00:19).
+# Поэтому для Devin свежие файлы в репозитории (логи обучения, history.csv, чекпоинты) тоже
+# считаются признаком жизни. Каталоги ниже не просматриваем: тысячи кропов, окружения, кэши.
+ACTIVITY_POLL_S = 30.0
+_ACTIVITY_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        ".venv-train",
+        "__pycache__",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        "node_modules",
+        "crops",
+        "pages",
+        "sheets",
+        "review",
+        "layouts",
+    }
+)
 # Повторы сессии при временных ошибках API (403 `authentication_failed`, 408, 429, 5xx,
 # перегрузка, обрыв соединения): сколько раз и пауза до первого повтора, сек (дальше
 # удваивается, не больше MAX_API_RETRY_DELAY_S). Сам `claude` уже повторил запрос до 10 раз.
@@ -106,6 +132,37 @@ ESCALATION = {
     ("claude-opus-5-5", "xhigh"): ("claude-opus-5-5", "max"),
 }
 ESCALATION_AFTER_MAX = "Devin: --channel devin --devin-model claude-fable-5-1-high"
+
+# Devin: модель канала по умолчанию та же, что в Claude Code. ID Devin = ID Claude-модели +
+# «-» + effort (`claude-opus-5-5` + `high` → `claude-opus-5-5-high`); у Sonnet 5/5.5, Opus 5/5.5
+# и Fable есть все пять уровней. Без effort в шапке берётся medium.
+DEVIN_DEFAULT_EFFORT = "medium"
+# Devin берёт реестр моделей из удалённого конфига (unleash.codeium.com) с таймаутом 2–5 с.
+# На медленной сети он не успевает, и `devin -p` за секунды падает, не обратившись к модели:
+#   Error: Unknown model: '<id>'  /  Available: <пусто>
+#   ... Model not found: <id>. Available models: <пусто>
+# Это не ошибка ID: повторный запуск проходит (замер 7 октября: 1 из 8 попыток при загрузке
+# сети остальным процессом, 2 из 2 в тихий момент). Пустой список — признак для повтора;
+# непустой («Available: swe-2-high, …») означает настоящую опечатку, её не повторяем.
+DEVIN_START_RETRIES = 40
+DEVIN_START_RETRY_DELAY_S = 5.0
+_DEVIN_EMPTY_REGISTRY_RE = re.compile(
+    r"Unknown model:[^\n]*\n\s*Available:[ \t]*(?:\n|$)"
+    r"|Model not found:[^\n]*?Available models:[ \t]*(?:\"|\n|$)"
+)
+# Постоянные ошибки запуска Devin: повтор не поможет, нужна подсказка.
+_DEVIN_FATAL_HINTS = (
+    (
+        "untrusted workspace",
+        "каталог не отмечен как доверенный: откройте `devin` интерактивно в репозитории "
+        "и подтвердите доверие",
+    ),
+    (
+        "not allowed by your organization",
+        "модель запрещена политикой организации Devin: возьмите другую (`devin models list`)",
+    ),
+    ("not logged in", "нет входа: выполните `devin auth login`"),
+)
 
 TASK_PROMPT = (
     "Execute task {id} of the OCR plan. First read docs/ocr_tasks/_common.md, then "
@@ -262,8 +319,9 @@ def unmet_dependencies(task: Task) -> list[str]:
     return unmet
 
 
-def print_status(tasks: dict[str, Task]) -> None:
+def print_status(tasks: dict[str, Task], *, devin_models: str = "same") -> None:
     statuses = task_statuses()
+    mapping = os.environ.get("OCR_MODEL_MAP")
     rows = []
     for task in tasks.values():
         if task.id == "R":
@@ -275,7 +333,10 @@ def print_status(tasks: dict[str, Task]) -> None:
         if task.optional:
             state += " (опц.)"
         claude = f"{task.claude_model}/{task.claude_effort}" if task.claude_model else "—"
-        devin = task.devin_model or "—"
+        if devin_models == "header" or not task.claude_model:
+            devin = task.devin_model or "—"
+        else:
+            devin = devin_model_id(task.claude_model, task.claude_effort, mapping)
         rows.append((task.id, task.title[:48], task.channel, claude, devin, state))
     widths = [max(len(str(row[i])) for row in rows) for i in range(len(rows[0]))]
     for row in rows:
@@ -352,6 +413,40 @@ def apply_model_map(model: str, mapping: str | None) -> str:
     return model
 
 
+def devin_model_id(base: str, effort: str, mapping: str | None = None) -> str:
+    """ID модели Devin, равной модели Claude Code: `claude-opus-5-5` + `high` → `…-high`.
+
+    Подмена `OCR_MODEL_MAP` применяется к базовому ID до добавления effort.
+    """
+    return f"{apply_model_map(base, mapping)}-{effort or DEVIN_DEFAULT_EFFORT}"
+
+
+def devin_command(executable: str, prompt: str, model: str) -> list[str]:
+    """Команда `devin -p` с явной моделью.
+
+    Модель задаётся флагом `--model`. Раньше раннер подменял `agent.model` в общем
+    `config.json` десктопного Devin: вывод «`--model` всегда Unknown model» был ошибкой,
+    это тот же плавающий сбой загрузки реестра (см. DEVIN_START_RETRIES). `dangerous`:
+    в `auto`/`accept-edits` `devin -p` отклоняет любую команду оболочки (pytest, git commit),
+    `smart` здесь недоступен.
+    """
+    return [executable, "-p", prompt, "--model", model, "--permission-mode", DEVIN_PERMISSION_MODE]
+
+
+def devin_start_failure(text: str) -> bool:
+    """Сессия Devin не стартовала из-за пустого реестра моделей (медленная сеть): повторить."""
+    return _DEVIN_EMPTY_REGISTRY_RE.search(text) is not None
+
+
+def devin_fatal_hint(text: str) -> str | None:
+    """Подсказка для постоянной ошибки запуска Devin (повтор бесполезен) либо None."""
+    lowered = text.lower()
+    for marker, hint in _DEVIN_FATAL_HINTS:
+        if marker in lowered:
+            return hint
+    return None
+
+
 @dataclass
 class RunPlan:
     channel: str
@@ -364,33 +459,44 @@ class RunPlan:
 
 
 def build_plan(task: Task, args: argparse.Namespace) -> RunPlan:
+    mapping = args.model_map or os.environ.get("OCR_MODEL_MAP")
+    # verbatim: готовый ID Devin (ревьюер, --devin-model, режим header): без map и без effort.
+    verbatim = False
     if args.review:
         channel, model, effort = _review_target(task, args)
+        verbatim = channel == "devin"
         prompt = REVIEW_PROMPT.format(id=task.id, path=task.path)
         max_turns = 60
     else:
         channel = args.channel or ("devin" if task.channel.startswith("devin") else "claude")
-        model = task.claude_model if channel == "claude" else task.devin_model
-        effort = task.claude_effort if channel == "claude" else ""
+        model, effort = task.claude_model, task.claude_effort
         prompt = TASK_PROMPT.format(id=task.id, path=task.path)
         max_turns = task.max_turns
         if args.fix:
             prompt += FIX_SUFFIX.format(id=task.id)
-            if channel == "claude":
-                model, effort = ESCALATION.get((model, effort), (model, effort))
+            model, effort = ESCALATION.get((model, effort), (model, effort))
+        if channel == "devin" and args.devin_models == "header":
+            model, effort, verbatim = task.devin_model, "", True
     if channel == "claude" and task.channel == "devin_only" and not args.review:
         print(f"[i] {task.id}: по справочнику это задача для Devin (бесплатная SWE-2).")
-    if channel == "devin" and task.channel == "claude_only":
-        raise SystemExit(f"{task.id}: только Claude (картинки или машина пользователя).")
-    if args.devin_model and channel == "devin":
-        model = args.devin_model
+    if channel == "devin" and task.channel == "claude_only" and args.keep_claude_only:
+        raise SystemExit(f"{task.id}: только Claude (--keep-claude-only).")
     if args.model:
-        model = args.model
+        # В Devin --model — это базовая модель Claude (effort добавится), в ревью — готовый ID.
+        model, verbatim = args.model, args.review and channel == "devin"
     if args.effort:
         effort = args.effort
-    model = apply_model_map(model, args.model_map or os.environ.get("OCR_MODEL_MAP"))
+    if args.devin_model and channel == "devin":
+        model, verbatim = args.devin_model, True
     if not model:
         raise SystemExit(f"{task.id}: для канала {channel} в шапке не задана модель.")
+    if channel == "devin":
+        if verbatim:
+            effort = ""  # effort уже внутри ID
+        else:
+            model = devin_model_id(model, effort, mapping)
+    else:
+        model = apply_model_map(model, mapping)
 
     executable = find_claude() if channel == "claude" else (shutil.which(channel) or channel)
     suffix = "_review" if args.review else "_fix" if args.fix else ""
@@ -423,8 +529,7 @@ def build_plan(task: Task, args: argparse.Namespace) -> RunPlan:
             command += ["--max-budget-usd", f"{budget:g}"]
         command += ["--disallowedTools", DISALLOWED_TOOLS]
     else:
-        # Модель Devin задаётся через config.json (devin_model_config), а не флагом --model.
-        command = [executable, "-p", prompt, "--permission-mode", DEVIN_PERMISSION_MODE]
+        command = devin_command(executable, prompt, model)
     return RunPlan(channel, executable, command, prompt, model, effort, log_name)
 
 
@@ -610,35 +715,32 @@ def _window_usage(info: dict[str, Any] | None) -> str:
     return " ".join(parts)
 
 
-def devin_config_path() -> Path:
-    return Path(os.environ.get("APPDATA", str(Path.home()))) / "devin" / "config.json"
-
-
-@contextlib.contextmanager
-def devin_model_config(model: str) -> Iterator[None]:
-    """Временно выставить модель Devin в его config.json (`agent.model`).
-
-    `devin -p --model X` на этой машине отвечает «Unknown model» при любом X, а модель
-    из конфига работает, поэтому модель задачи пишем в конфиг и возвращаем исходный
-    файл байт в байт после запуска (в том числе при падении или Ctrl+C).
-    Конфиг общий с десктопным Devin: на время задачи его модель тоже будет другой.
-    """
-    path = devin_config_path()
-    original = path.read_bytes()
-    config = json.loads(original.decode("utf-8-sig"))
-    config.setdefault("agent", {})["model"] = model
-    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        yield
-    finally:
-        path.write_bytes(original)
-
-
 def _rel(path: Path) -> str:
     try:
         return str(path.relative_to(REPO_ROOT))
     except ValueError:
         return str(path)
+
+
+def _short_log_text(path: Path, limit: int = 8192) -> str:
+    """Текст лога, если он короткий (сбой старта); длинную успешную сессию не читаем."""
+    try:
+        if path.stat().st_size >= limit:
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def latest_file_activity(root: Path = REPO_ROOT) -> float:
+    """Время (epoch) самого свежего изменения файла в репозитории; 0.0, если файлов нет."""
+    newest = 0.0
+    for folder, dirs, files in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in _ACTIVITY_SKIP_DIRS]
+        for name in files:
+            with contextlib.suppress(OSError):
+                newest = max(newest, os.stat(os.path.join(folder, name)).st_mtime)
+    return newest
 
 
 def _kill_tree(process: subprocess.Popen[str]) -> None:
@@ -660,11 +762,13 @@ def _stream_process(
     log_path: Path,
     summary: StreamSummary,
     idle_timeout_s: float,
+    activity_probe: Callable[[], float] | None = None,
 ) -> tuple[int, str | None]:
     """Выполнить сессию, писать лог и сводку. Возвращает (код выхода, причина остановки).
 
     Причины: None — штатное завершение; "idle" — сторож: ни одной строки вывода за
-    `idle_timeout_s` секунд, сессия убита; "orphan-pipe" — процесс уже завершился, но канал
+    `idle_timeout_s` секунд (и `activity_probe`, если задан, не видит свежих файлов),
+    сессия убита; "orphan-pipe" — процесс уже завершился, но канал
     вывода держит чей-то потомок: ждём не дольше нескольких секунд и идём дальше.
     """
     extra: dict[str, Any] = {} if os.name == "nt" else {"start_new_session": True}
@@ -685,8 +789,19 @@ def _stream_process(
     def pump() -> None:
         assert process.stdout is not None
         try:
-            for line in process.stdout:
-                lines.put(line)
+            if plan.channel == "devin":
+                # Devin печатает текст без переводов строки: построчное чтение молчало бы
+                # до конца сессии, и сторож убил бы живую работу. Читаем кусками.
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                raw = cast(Any, process.stdout).buffer
+                while chunk := raw.read1(4096):
+                    if text := decoder.decode(chunk):
+                        lines.put(text)
+                if tail := decoder.decode(b"", final=True):
+                    lines.put(tail)
+            else:
+                for line in process.stdout:
+                    lines.put(line)
         finally:
             lines.put(None)
 
@@ -695,6 +810,7 @@ def _stream_process(
     exited_at: float | None = None
     reason: str | None = None
     orphan_grace_s = 5.0
+    next_probe = 0.0
 
     def handle(line: str, log: Any) -> None:
         log.write(line)
@@ -715,9 +831,13 @@ def _stream_process(
                     if now - exited_at > orphan_grace_s:
                         reason = "orphan-pipe"
                         break
-                elif idle_timeout_s and now - last_output > idle_timeout_s:
-                    reason = "idle"
-                    break
+                elif idle_timeout_s:
+                    if activity_probe is not None and now >= next_probe:
+                        next_probe = now + min(ACTIVITY_POLL_S, idle_timeout_s / 4)
+                        last_output = max(last_output, now - (time.time() - activity_probe()))
+                    if now - last_output > idle_timeout_s:
+                        reason = "idle"
+                        break
                 continue
             if line is None:
                 break
@@ -746,12 +866,18 @@ def run(
     idle_timeout_min: float = DEFAULT_IDLE_TIMEOUT_MIN,
     api_retries: int = DEFAULT_API_RETRIES,
     api_retry_delay_s: float = DEFAULT_API_RETRY_DELAY_S,
+    devin_start_retries: int = DEVIN_START_RETRIES,
+    devin_start_retry_delay_s: float = DEVIN_START_RETRY_DELAY_S,
+    backup_branch: bool = True,
     log_dir: Path = LOG_DIR,
+    activity_probe: Callable[[], float] | None = None,
 ) -> int:
     """Запуск сессии со сторожем зависаний и повтором при временных ошибках API.
 
     Повтор — это новая сессия с тем же заданием: результаты прошлой лежат в файлах
     и в `PROGRESS.md`, поэтому она продолжает, а не начинает с нуля.
+    У Devin отдельный повтор старта: сессия, не загрузившая реестр моделей, не успела
+    ничего сделать, поэтому её перезапускают с короткой паузой и в тот же лог.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -759,14 +885,16 @@ def run(
     if plan.channel == "devin":
         # Хук .git/hooks/pre-push блокирует push, пока стоит эта переменная.
         env["OCR_NO_PUSH"] = "1"
-        backup = f"ocr-backup/{task.id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        git("branch", backup)
-        print(f"[backup] ветка {backup} (откат: git reset --hard {backup})")
+        if backup_branch:
+            backup = f"ocr-backup/{task.id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            git("branch", backup)
+            print(f"[backup] ветка {backup} (откат: git reset --hard {backup})")
     if not keep_api_key:
         # ANTHROPIC_API_KEY в -p важнее подписки: сессия ушла бы в оплату по API (D-28).
         env.pop("ANTHROPIC_API_KEY", None)
     print(f"[run] {task.id} → {plan.channel} {plan.model} {plan.effort}".rstrip())
     attempt = 0
+    start_failures = 0
     while True:
         log_name = plan.log_name
         if attempt:
@@ -774,11 +902,26 @@ def run(
         log_path = log_dir / log_name
         print(f"[log] {_rel(log_path)}")
         summary = StreamSummary()
-        model_context = (
-            devin_model_config(plan.model) if plan.channel == "devin" else contextlib.nullcontext()
-        )
-        with model_context:
-            code, reason = _stream_process(plan, env, log_path, summary, idle_timeout_min * 60)
+        probe = activity_probe
+        if probe is None and plan.channel == "devin":
+            probe = latest_file_activity
+        code, reason = _stream_process(plan, env, log_path, summary, idle_timeout_min * 60, probe)
+        if plan.channel == "devin" and reason is None:
+            head = _short_log_text(log_path)
+            if devin_start_failure(head):
+                if start_failures < devin_start_retries:
+                    start_failures += 1
+                    print(
+                        "[devin] реестр моделей не загрузился (медленная сеть): повтор "
+                        f"{start_failures}/{devin_start_retries} "
+                        f"через {devin_start_retry_delay_s:g} с"
+                    )
+                    time.sleep(devin_start_retry_delay_s)
+                    continue
+                print(f"[devin] {devin_start_retries} стартов подряд без реестра моделей: сдаюсь")
+                code = code or 1
+            elif hint := devin_fatal_hint(head):
+                print(f"[devin] {hint}")
         if plan.channel == "claude":
             print(summary.report())
         if reason == "idle":
@@ -802,6 +945,113 @@ def run(
     print(f"код выхода: {code}")
     print(f"Проверьте: git log -1 --stat и раздел {task.id} в docs/ocr_tasks/PROGRESS.md")
     return code
+
+
+DEVIN_PROBE_PROMPT = "Reply with exactly the word PONG and nothing else. Do not use any tools."
+
+
+def _devin_call(executable: str, *cli_args: str, timeout: float) -> tuple[int, str]:
+    try:
+        done = subprocess.run(
+            [executable, *cli_args],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return 1, str(error)
+    return done.returncode, done.stdout + done.stderr
+
+
+def devin_available_models(executable: str, attempts: int = 3) -> set[str]:
+    """ID моделей подписки из `devin models list` (пусто, если список не получен)."""
+    for _ in range(attempts):
+        code, text = _devin_call(executable, "models", "list", timeout=180)
+        ids = set(re.findall(r"^ {2}([a-z0-9][a-z0-9.\-]*) {2,}", text, re.MULTILINE))
+        if code == 0 and ids:
+            return ids
+    return set()
+
+
+def devin_check(tasks: dict[str, Task], args: argparse.Namespace) -> int:
+    """Проверка канала Devin: CLI, вход, модели оставшихся задач в подписке, живой ответ.
+
+    Последний шаг идёт тем же кодом, что и боевой запуск (`run()` со стартовыми повторами,
+    каталог репозитория), на дешёвой модели, поэтому проверяет и доверие к каталогу.
+    """
+    executable = shutil.which("devin")
+    if executable is None:
+        print("[check] devin не найден в PATH")
+        return 2
+    version = cli_version(executable)
+    print(f"[check] devin {'.'.join(map(str, version)) if version else '?'}: {executable}")
+    code, text = _devin_call(executable, "auth", "status", timeout=120)
+    first = text.strip().splitlines()[0] if text.strip() else "нет ответа"
+    print(f"[check] вход: {first}")
+    if code != 0 or "logged in" not in text.lower():
+        print("[check] выполните `devin auth login`")
+        return 2
+
+    mapping = args.model_map or os.environ.get("OCR_MODEL_MAP")
+    statuses = task_statuses()
+    needed: dict[str, list[str]] = {}
+    for task in tasks.values():
+        if task.id == "R" or statuses.get(task.id) == "готово":
+            continue
+        if task.channel == "claude_only" and args.keep_claude_only:
+            continue
+        if args.devin_models == "header":
+            model = task.devin_model
+        else:
+            model = devin_model_id(task.claude_model, task.claude_effort, mapping)
+            if not task.claude_model:
+                continue
+        if model:
+            needed.setdefault(model, []).append(task.id)
+        if task.review.startswith("devin:"):
+            reviewer = task.review.removeprefix("devin:").partition("/")[0]
+            needed.setdefault(reviewer, []).append(f"{task.id}-ревью")
+    available = devin_available_models(executable)
+    if not available:
+        print("[check] список моделей Devin не получен (медленная сеть?): сверка пропущена")
+    else:
+        for model, ids in sorted(needed.items()):
+            mark = "есть" if model in available else "НЕТ В ПОДПИСКЕ"
+            print(f"[check] модель {model}: {mark} ({', '.join(sorted(ids))})")
+    missing = sorted(model for model in needed if available and model not in available)
+
+    probe = args.devin_model or devin_model_id(
+        args.model or "claude-sonnet-5-5", args.effort or "low", mapping
+    )
+    plan = RunPlan(
+        channel="devin",
+        executable=executable,
+        command=devin_command(executable, DEVIN_PROBE_PROMPT, probe),
+        prompt=DEVIN_PROBE_PROMPT,
+        model=probe,
+        effort="",
+        log_name=f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_check_devin.jsonl",
+    )
+    log_dir = LOG_DIR / "checks"
+    run(
+        plan,
+        Task(id="CHECK", file=""),
+        idle_timeout_min=5,
+        devin_start_retries=args.devin_start_retries,
+        devin_start_retry_delay_s=args.devin_start_retry_delay,
+        backup_branch=False,
+        log_dir=log_dir,
+    )
+    answer = (log_dir / plan.log_name).read_text(encoding="utf-8", errors="replace")
+    alive = "PONG" in answer
+    print(f"[check] ответ модели {probe}: {'PONG — работает' if alive else 'НЕ ПОЛУЧЕН'}")
+    if missing:
+        print("[check] этих моделей нет в подписке: " + ", ".join(missing))
+    return 0 if alive and not missing else 1
 
 
 def queue_candidates(
@@ -867,9 +1117,9 @@ def run_queue(tasks: dict[str, Task], args: argparse.Namespace) -> int:
         attempted.add(task.id)
         print(f"\n[queue] ===== {task.id} {task.title} =====", flush=True)
         task_args = args
-        if args.channel == "devin" and task.channel == "claude_only":
-            # В очереди --channel devin значит «Devin там, где разрешено»: картинки и
-            # машина пользователя (claude_only) идут на Claude, а не роняют очередь.
+        if args.channel == "devin" and task.channel == "claude_only" and args.keep_claude_only:
+            # С --keep-claude-only задачи с картинками (claude_only) идут на Claude, а не
+            # роняют очередь. Без флага Devin берёт и их (разрешение владельца, 2026-10-07).
             task_args = copy.copy(args)
             task_args.channel = "claude"
             print(f"[queue] {task.id}: claude_only, эта задача идёт на Claude")
@@ -914,7 +1164,38 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--channel", choices=["claude", "devin"])
     parser.add_argument("--model", help="полный ID модели вместо шапки")
     parser.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
-    parser.add_argument("--devin-model", help="UID модели Devin вместо шапки")
+    parser.add_argument(
+        "--devin-model", help="готовый ID модели Devin, например claude-opus-5-5-high"
+    )
+    parser.add_argument(
+        "--devin-models",
+        choices=["same", "header"],
+        default="same",
+        help="модели канала Devin: same — те же, что в Claude Code (ID + effort), "
+        "header — devin_model из шапки (SWE-2 и прочие)",
+    )
+    parser.add_argument(
+        "--keep-claude-only",
+        action="store_true",
+        help="задачи claude_only (кропы сканов) не отдавать Devin, а оставить на Claude",
+    )
+    parser.add_argument(
+        "--devin-check",
+        action="store_true",
+        help="проверить Devin: вход, модели задач в подписке, ответ PONG на выбранной модели",
+    )
+    parser.add_argument(
+        "--devin-start-retries",
+        type=int,
+        default=DEVIN_START_RETRIES,
+        help="повторов старта Devin, если не загрузился реестр моделей (медленная сеть)",
+    )
+    parser.add_argument(
+        "--devin-start-retry-delay",
+        type=float,
+        default=DEVIN_START_RETRY_DELAY_S,
+        help="пауза между повторами старта Devin, сек",
+    )
     parser.add_argument("--model-map", help="подмена моделей: a=b,c=d (или OCR_MODEL_MAP)")
     parser.add_argument("--review", action="store_true", help="ревью по R_review.md")
     parser.add_argument("--reviewer", help="например devin:gpt-6-astra-high")
@@ -981,6 +1262,8 @@ def run_single(task: Task, args: argparse.Namespace) -> int:
         idle_timeout_min=args.idle_timeout,
         api_retries=args.api_retries,
         api_retry_delay_s=args.api_retry_delay,
+        devin_start_retries=args.devin_start_retries,
+        devin_start_retry_delay_s=args.devin_start_retry_delay,
     )
 
 
@@ -1001,8 +1284,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.review or args.fix:
             raise SystemExit("--all несовместимо с --review/--fix: ревью делается по задаче")
         return run_queue(tasks, args)
+    if args.devin_check:
+        return devin_check(tasks, args)
     if args.status or not args.task:
-        print_status(tasks)
+        print_status(tasks, devin_models=args.devin_models)
         return 0
     task = tasks.get(args.task.upper())
     if task is None:

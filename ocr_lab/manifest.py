@@ -235,7 +235,7 @@ def load_corrections(path: Path = CORRECTIONS_CSV) -> dict[tuple[str, str], Corr
     out: dict[tuple[str, str], Correction] = {}
     with path.open("r", encoding="utf-8-sig", newline="") as fh:
         for row in csv.DictReader(fh):
-            if row.get("status") != "confirmed":
+            if (row.get("status") or "").strip().lower() != "confirmed":
                 continue
             out[(row["scan_id"].strip(), row["field"].strip())] = Correction(
                 export_value=row["export_value"].strip(),

@@ -76,6 +76,11 @@ python docs/ocr_tasks/run_task.py T00             # запустить
 | `--review` | Ревью по `prompts/R_review.md` ревьюером из шапки (другой вендор) |
 | `--fix` | Повтор после ревью «❌» на ступень выше: сначала effort, потом модель (справочник, § 8.3) |
 | `OCR_MODEL_MAP="claude-sonnet-5=claude-sonnet-5-5"` | Подменить модель во всех задачах без правки шапок |
+| `--channel devin` | Задача идёт через `devin -p` **на тех же моделях, что в Claude Code**: ID Claude + effort (`claude-opus-5-5` + `high` → `claude-opus-5-5-high`), подмена `OCR_MODEL_MAP` учитывается. Включая `claude_only` (картинки): владелец разрешил отправлять кропы в Devin (2026-10-07), страницы целиком по-прежнему нельзя (`_common.md`, § 3) |
+| `--devin-models header` | Вместо тех же моделей взять `devin_model` из шапки (SWE-2 и др.) |
+| `--devin-model <ID>` | Готовый ID Devin, например `claude-fable-5-1-high` |
+| `--keep-claude-only` | Задачи `claude_only` не отдавать Devin, оставить на Claude |
+| `--devin-check` | Проверка Devin: вход, наличие в подписке моделей оставшихся задач и ревьюеров, живой ответ PONG из каталога репозитория |
 | `--budget auto` | Потолок `--max-budget-usd` по размеру блока (S 3, M 5, L 8). На подписке сначала проверить |
 | `--export-json` | Шапки всех задач в JSON — для своего раннера очереди с `model-routing.json` |
 | `--cloud-prompt` | Текст задания для облачной сессии (см. `cloud_alternative.md`) |
@@ -112,6 +117,13 @@ python docs/ocr_tasks/run_task.py --all             # выполнять по о
   удваивается, не больше 30 минут). Сам `claude` к этому моменту уже повторил запрос до 10 раз.
   Ошибки запроса (400, 404, 413), «Not logged in» и `error_max_turns` не повторяются: перезапуск
   их не исправит. Повтор продолжает с готовых файлов; лог — `…_retryN.jsonl`.
+- **Старт Devin.** Devin берёт реестр моделей из удалённого конфига с таймаутом 2–5 с. На
+  медленной сети `devin -p` иногда падает за секунды с `Unknown model … Available:` (пусто) или
+  `Model not found … Available models:` (пусто). Это не ошибка ID: раннер перезапускает старт
+  (`--devin-start-retries`, по умолчанию 40, пауза `--devin-start-retry-delay` 5 с) в тот же
+  лог. Непустой список в `Available:` — настоящая опечатка, она не повторяется. Модель
+  задаётся флагом `--model`; общий `config.json` десктопного Devin раннер больше не трогает.
+  Вывод Devin читается кусками, потому что он печатает текст без переводов строки.
 - **Поиск `claude`.** Среди `PATH`, `%APPDATA%\Claude\claude-code\…` и `~/.local/bin`
   берётся самая свежая версия по `--version`. Свой путь: переменная `OCR_CLAUDE_BIN`.
 
