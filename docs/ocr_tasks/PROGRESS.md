@@ -2600,3 +2600,126 @@
     ошибок на уровне отдельных сканов (видно по `2026_226k`) — сравнивать версии нужно по
     агрегатам (как в этой задаче), а не ожидать, что старые ошибки просто исчезнут без
     появления новых.
+
+## T25 — Рантайм-пайплайн распознавания для приложения (2026-10-12)
+- Статус: готово
+- Сделано:
+  - `app/ocr/pipeline.py` — единая точка входа `recognize_voucher(path, *, tug_hint=None,
+    context: RecognitionContext, resources=None, auto_accept_threshold=…, crops_dir=None,
+    save_crops=True) -> VoucherRecognition`. Собирает уже готовые модули `app/ocr/*`:
+    `io.load_scan` + `normalize_width` → `variants.detect_variant` → `crops.locate_boxes` +
+    `crop_box` → модели (`Recognizer`, по умолчанию `OnnxRecognizer` поверх `app.ocr.runtime`)
+    → `decoder.decode` (ядро) → `number_decoder.decode_number_output` → при наличии партнёра —
+    `pair_decoder.decode_pair`.
+  - `RecognitionContext` — контекст ваучера от приложения: `year`, `app_dt`, `work_type`,
+    `filename`, `number_history` (`NumberHistory`: ожидаемый номер/занятые номера/пауза —
+    приложение считает их само через `predict_next`/`number_decoder.history_context`),
+    `partner` (`ConfirmedPartner` с записями бланка или `PendingPartner` — свой путь к файлу
+    и контекст, тоже будет распознан).
+  - `VoucherRecognition` — контракт: `status`/`reason` (`ok`/`no_models`/`align_failed`/
+    `error`), `variant`/`alignment`, `fields` (top-3 по каждой из 4 строк, `DecodeResult.
+    marginals`), `voucher_number` (top-3), `records` (top-N записей целиком), `confidence`/
+    `margin` итоговой записи (после пары, если была), `auto_accept`, `crop_paths` (кропы 17
+    подполей, безопасные имена — `app.services.voucher_files.safe_basename`), `timing` по
+    этапам, `flags` (объединение кодов ядра/номера/пары плюс свой `partner_unavailable`).
+  - Деградация без падений: нет эталонов/моделей (`get_resources` бросает `FileNotFoundError`/
+    `LayoutError`/`OcrRuntimeError`, в том числе если в среде не поставлен `onnxruntime`) →
+    `no_models`; выравнивание не прошло пороги или нет макета боксов для варианта →
+    `align_failed` (отдельного запасного пути T11 нет — решение T10 было не делать её, см.
+    её раздел); битый файл или сбой модели при уже проверенных ресурсах → `error` (только
+    тип исключения в `reason`, без данных ваучера); партнёр `PendingPartner` недоступен
+    (файл не читается) → запись ядра без пары плюс флаг `partner_unavailable`, не падение.
+  - Ресурсы процесса — кэш `get_resources()`/`reset_resources()` по (каталог моделей,
+    каталог эталонов, версия модели) под блокировкой `threading.Lock`, как у `OnnxModel` в
+    `app.ocr.runtime`; приоры декодера/номера/пары — не обязательны (без файла — приоры по
+    умолчанию, как и раньше в T19/T20), обязательны только `digits_<v>`/`number_<v>`
+    (`meta.json`) и хотя бы один эталон варианта.
+  - `app/config.py` (`Settings`, префикс `APP_`): `ocr_models_dir` (`data/ocr/models`),
+    `ocr_layouts_dir` (`data/ocr/layouts`), `ocr_crops_dir` (`data/files/ocr_crops`),
+    `ocr_auto_accept_threshold` (`0.9995`), `ocr_enabled` (`True`) — пайплайн их не читает
+    сам (чтобы не тянуть `app.config` в `app/ocr/`), T26 должен передавать значения
+    параметрами (`get_resources(models_dir=settings.ocr_models_dir, …)`,
+    `recognize_voucher(…, crops_dir=settings.ocr_crops_dir, auto_accept_threshold=
+    settings.ocr_auto_accept_threshold)`); `ocr_enabled` — переключатель уровня приложения
+    (звать ли вообще `recognize_voucher`), пайплайн о нём не знает.
+  - Тесты `tests/ocr/test_pipeline.py` (11, только синтетика: `tests/ocr/synth.py` +
+    `FakeRecognizer` вместо весов, как в `tests/ocr/test_eval_pipeline.py`): контракт `ok`
+    (поля, номер, записи, кропы на диске, этапы времени), порог `auto_accept`, отключение
+    сохранения кропов, `no_models` (пустой `OCR_WORK_DIR`), битый/отсутствующий файл →
+    `error` без исключения наружу, `align_failed` на шуме, партнёр подтверждён/ожидает
+    проверки/недоступен, и отдельный тест на критерий приёмки — `app/ocr/*.py` не
+    импортирует `torch`/`transformers` (AST по всем файлам пакета, не только grep).
+- Цифры (20 реальных сканов `test` из `data/ocr/manifest.csv`, локальный CPU, модели
+  `digits_v1`/`number_v1`, порог не варьировался):
+  - разовая загрузка ресурсов процесса (`get_resources()`: 3 эталона варианта + их ORB/SIFT
+    признаки, модели цифр и номера, приоры) — 1,97 с, один раз на процесс, не в бюджете
+    одного ваучера;
+  - время на ваучер (после прогрева): медиана **0,487 с**, p95 1,49 с, максимум 1,54 с —
+    цель «не больше 2 с» выполнена на всех 20 сканах;
+  - по этапам (медиана / максимум, с): `load` 0,143 / 0,176; `align` 0,170 / 1,219; `crops`
+    0,005 / 0,008; `digits` 0,041 / 0,241; `decode` 0,007 / 0,020; `number` 0,063 / 0,165;
+    `save_crops` 0,044 / 0,066;
+  - два скана (`2026_229p`, `2026_220p`) дали `align` ≈ 1,2 с — видимо, запасной путь SIFT
+    или проверка обеих вёрсток Пионера (`pioneer_v1`/`pioneer_v2`) без раннего уверенного
+    совпадения; оба всё равно уложились в 2 с итогом (1,54 и 1,50 с);
+  - статусы: 20/20 `ok`; падений нет.
+- Решения без человека:
+  - Контракт `recognize_voucher` расширен необязательными именованными параметрами
+    (`resources`, `auto_accept_threshold`, `crops_dir`, `save_crops`) сверх `path`/`tug_hint`/
+    `context` из промпта — обратная совместимость с контрактом сохранена (можно звать ровно
+    как в промпте), но без них неоткуда взять каталоги и порог без обращения к `app.config`
+    (что запретило бы `app/ocr/` оставаться независимым от слоя приложения).
+  - `app/ocr/pipeline.py` не импортирует `app.config`: каталоги по умолчанию читаются из тех
+    же переменных окружения, что и `app.ocr.runtime.models_dir()`
+    (`OCR_MODELS_DIR`/`OCR_WORK_DIR`, `OCR_MODEL_VERSION`), плюс новая `default_layouts_dir()`
+    (`OCR_LAYOUTS_DIR`/`<OCR_WORK_DIR>/layouts`) и `default_crops_dir()` (`OCR_CROPS_DIR`/
+    `data/files/ocr_crops`) — симметрично существующему паттерну T18. T26 передаёт значения
+    `Settings` параметрами явно (см. «для следующих задач»).
+  - Распознаватель моделей вынесен в маленький протокол `Recognizer` (`digits`/`number`) с
+    реализацией `OnnxRecognizer` поверх `app.ocr.runtime`, по образцу `Recognizer`/
+    `OnnxRecognizer` из `ocr_lab/eval_pipeline.py` (T21) — тот же проверенный шов для тестов
+    без весов, вместо отдельного duck-typing вокруг `rt.OnnxModel`.
+  - `PendingPartner` прогоняется через тот же `_recognize_core` (выравнивание + кропы +
+    цифры), что и основной ваучер, без своего отдельного номера (пара использует только
+    даты): дешевле не тянуть лишний проход по номеру партнёра, декодеру пары он не нужен.
+  - «No models» — только структурные проблемы (нет каталога эталонов, нет `meta.json`
+    моделей, не ставится `onnxruntime`); приоры декодера/номера/пары не обязательны (как и
+    раньше в T19/T20 — без файла работают приоры по умолчанию), их отсутствие не повод для
+    `no_models`.
+  - Макет боксов есть не для всех возможных вариантов эталонов «вслепую»: если
+    `detect_variant` выбрал вариант, для которого нет `app/ocr/layouts/<variant>.json`,
+    это `align_failed` (а не `no_models` или `error`) — такой вариант для этого бланка
+    попросту не готов к распознаванию подполей, это тот же класс проблемы, что и
+    невыровненный скан.
+  - `auto_accept_threshold` по умолчанию в модуле и в `Settings.ocr_auto_accept_threshold`
+    — одно и то же число 0,9995 (консервативный порог T21/T22, не перекалиброванный
+    0,927157): выбор порога для прода остаётся за человеком на H5, дефолт — безопасный.
+  - Кропы сохраняются под именем `safe_basename(scan_path.name)` без суффикса — то же
+    безопасное имя, что `app.services.voucher_files` даёт загруженным файлам (там уже есть
+    sha256-префикс, так что коллизий разных ваучеров с одинаковым именем файла не будет).
+- Вопросы к человеку: нет.
+- Для следующих задач:
+  - T26 (интеграция в приложение) собирает `RecognitionContext` из БД: `year`/`work_type`
+    — как в `ocr_lab.fit_decoder_priors.context_for`; `app_dt` — `_application_datetime`
+    (`app/services/voucher.py`); `number_history` — `predict_next` (`app.services.
+    voucher_number`) для `expected` и `app.ocr.number_decoder.history_context` по уже
+    подтверждённым ваучерам (буксир, год) для `used`/`pause_days`; `partner` — по заявке/
+    работе: `ConfirmedPartner`, если второй ваучер пары уже подтверждён, иначе
+    `PendingPartner` с его файлом и контекстом, либо `None`, если пары нет.
+  - Ресурсы грузить один раз при старте приложения: `app.ocr.pipeline.get_resources(
+    models_dir=settings.ocr_models_dir, layouts_dir=settings.ocr_layouts_dir,
+    model_version=settings.ocr_model_version)` и передавать объект в каждый вызов
+    `recognize_voucher(…, resources=…)`, иначе первый вызов на каждый новый набор
+    каталогов будет на ~2 с медленнее (прогрев эталонов и признаков).
+  - `status="no_models"`/`"align_failed"` — сигнал приложению посчитать приоры по-старому
+    (T26, как сейчас); `recognize_voucher` сам не делает отката на Tesseract/TrOCR — это
+    политика приложения, а не рантайма OCR.
+  - `VoucherRecognition.fields[row]` — `tuple[RowOption, ...]` (`app.ocr.decoder.RowOption`:
+    `.value` — `RowValue` с `.form_date/.hour/.minute/.dt`, `.p`); `records[i].to_json()` —
+    готовый формат для сохранения; `flags` стоит показывать рядом с карточкой (T27) —
+    особенно `hour24`, `minute_not_mult10`, `number_used`, `pair_differs`,
+    `partner_unavailable`.
+  - Подводный камень: `app/ocr/pipeline.py` сознательно не импортирует `app.config` и
+    `app.services.voucher.*` (кроме `voucher_files.safe_basename`, он не тянет SQLAlchemy/
+    torch) — если T26 захочет добавить больше контекста в `RecognitionContext`, собирать
+    его в слое приложения, а не внутри `app/ocr/`.

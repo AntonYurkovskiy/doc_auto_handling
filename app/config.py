@@ -69,6 +69,24 @@ class Settings(BaseSettings):
     # `DIGITS_MODEL`/`NUMBER_MODEL`.
     ocr_model_version: str = "v1"
 
+    # T25: рантайм-пайплайн распознавания (`app.ocr.pipeline.recognize_voucher`).
+    # Каталог моделей (`digits_<v>/`, `number_<v>/`, `*_priors_<v>.json`) — тот же, что
+    # собрала T22; передавайте явно в `app.ocr.pipeline.get_resources(models_dir=...)`.
+    ocr_models_dir: Path = DATA_DIR / "ocr" / "models"
+    # Эталоны вариантов бланка (T07): `<layouts_dir>/<variant>/{reference.png,
+    # static_mask.png, meta.json}`.
+    ocr_layouts_dir: Path = DATA_DIR / "ocr" / "layouts"
+    # Кропы подполей для показа в карточке ваучера (T27); безопасные имена — как в
+    # `app.services.voucher_files`.
+    ocr_crops_dir: Path = DATA_DIR / "files" / "ocr_crops"
+    # Порог `confidence`, с которого предсказание помечается `auto_accept` (только
+    # предзаполнение, не подтверждение — DECISIONS Q3). Значение по умолчанию —
+    # консервативный порог T21/T22 (`data/ocr/models/MODEL_CARD_v1.md`); окончательный
+    # порог для прода решает человек (H5).
+    ocr_auto_accept_threshold: float = 0.9995
+    # Включает вызов нового пайплайна (T25) вместо текущего Tesseract/TrOCR (T26).
+    ocr_enabled: bool = True
+
 
 settings = Settings()
 
