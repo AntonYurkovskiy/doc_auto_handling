@@ -223,12 +223,15 @@ def ensure_seed_corrections(path: Path = CORRECTIONS_CSV) -> int:
 class Correction:
     export_value: str
     corrected_value: str
+    source: str = ""
 
 
 def load_corrections(path: Path = CORRECTIONS_CSV) -> dict[tuple[str, str], Correction]:
     """Подтверждённые (`status=confirmed`) поправки истины: `(scan_id, field) -> Correction`.
 
-    `proposed`/`rejected` не применяются (ждут решения человека, H1).
+    `proposed`/`rejected` не применяются (ждут решения человека, H1). Поле `field` —
+    строка бланка (`left_base`/`arrived_base`/`started_work`/`finished_work`) или
+    `voucher_number` (T22: поправки номера из T21, конфликт дублей T02).
     """
     if not path.exists():
         return {}
@@ -240,6 +243,7 @@ def load_corrections(path: Path = CORRECTIONS_CSV) -> dict[tuple[str, str], Corr
             out[(row["scan_id"].strip(), row["field"].strip())] = Correction(
                 export_value=row["export_value"].strip(),
                 corrected_value=row["corrected_value"].strip(),
+                source=(row.get("source") or "").strip(),
             )
     return out
 
@@ -309,6 +313,7 @@ class BuildReport:
     crosses_midnight_count: int = 0
     minutes_mult10_count: int = 0
     n_final: int = 0
+    correction_source_counts: Counter[str] = field(default_factory=Counter)
 
 
 # --- Основная сборка -----------------------------------------------------------------------
@@ -382,6 +387,16 @@ def build(
         year = int(row_d["_year"])
         tug_code = TUG_CODE_BY_NAME[row_d["tug"]]
         voucher_number = extract_voucher_number(row_d["voucher_number"])
+        voucher_number_corrected = False
+        number_correction = corrections.get((scan_id, "voucher_number"))
+        if number_correction is not None:
+            voucher_number_corrected = True
+            report.correction_source_counts[number_correction.source] += 1
+            if voucher_number is not None and str(voucher_number) != number_correction.export_value:
+                report.correction_mismatches.append((scan_id, "voucher_number"))
+            corrected_number = extract_voucher_number(number_correction.corrected_value)
+            if corrected_number is not None:
+                voucher_number = corrected_number
         if voucher_number is None:
             report.unparsed_voucher_number.append(scan_id)
 
@@ -397,13 +412,14 @@ def build(
 
         pre: dict[str, ParsedDT | None] = {}
         final: dict[str, ParsedDT | None] = {}
-        corrected_fields: list[str] = []
+        corrected_fields: list[str] = ["voucher_number"] if voucher_number_corrected else []
         for r, src_col in ROW_SOURCE_COLUMN.items():
             parsed = parse_dt(row_d.get(src_col))
             pre[r] = parsed
             correction = corrections.get((scan_id, r))
             if correction is not None:
                 corrected_fields.append(r)
+                report.correction_source_counts[correction.source] += 1
                 if parsed is not None and format_dt(parsed) != correction.export_value:
                     report.correction_mismatches.append((scan_id, r))
                 final[r] = parse_dt(correction.corrected_value)
@@ -695,6 +711,12 @@ def render_report(report: BuildReport) -> str:
     if report.unparsed_voucher_number:
         lines.append("## Номер ваучера не разобран")
         lines.append(f"- scan_id: {', '.join(report.unparsed_voucher_number)}")
+        lines.append("")
+
+    if report.correction_source_counts:
+        lines.append("## Применённые поправки истины (status=confirmed) по источникам")
+        for source, n in sorted(report.correction_source_counts.items()):
+            lines.append(f"- {source or '(пусто)'}: {n}")
         lines.append("")
 
     if report.correction_mismatches:

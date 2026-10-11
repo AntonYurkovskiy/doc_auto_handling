@@ -412,6 +412,59 @@ def test_correction_applied_and_fixes_chain(built: tuple[pd.DataFrame, Any]) -> 
     assert not any(scan_id == "2025_90k" for scan_id, _ in report.chain_violations_after)
 
 
+def test_voucher_number_correction_is_applied(tmp_path: Path) -> None:
+    """T22: поправка `field=voucher_number` (конфликт дублей T02, 2026_220p) меняет номер."""
+    dataset_path = tmp_path / "reconciled_dataset.csv"
+    _write_dataset(dataset_path, [_row(1, voucher_number="217", voucher_file="220p.pdf",
+                                       tug="БК Пионер")])
+    corrections_path = tmp_path / "truth_corrections.csv"
+    with corrections_path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CORRECTIONS_COLUMNS)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "scan_id": "2025_220p",
+                "field": "voucher_number",
+                "export_value": "217",
+                "corrected_value": "220",
+                "status": "confirmed",
+                "source": "T21",
+                "note": "конфликт дублей T02, на бланке 220",
+            }
+        )
+    df, report = build(dataset_path, corrections_path)
+    row = _get(df, "2025_220p")
+    assert row["voucher_number"] == 220
+    assert "voucher_number" in row["truth_corrected"].split(";")
+    assert report.correction_source_counts["T21"] == 1
+    assert not report.correction_mismatches
+
+
+def test_voucher_number_correction_mismatch_is_reported(tmp_path: Path) -> None:
+    """Если `export_value` поправки не совпал с номером выгрузки — попадает в отчёт."""
+    dataset_path = tmp_path / "reconciled_dataset.csv"
+    _write_dataset(dataset_path, [_row(1, voucher_number="123", voucher_file="12k.pdf")])
+    corrections_path = tmp_path / "truth_corrections.csv"
+    with corrections_path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CORRECTIONS_COLUMNS)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "scan_id": "2025_12k",
+                "field": "voucher_number",
+                "export_value": "999",  # не совпадает с реальным номером выгрузки (123)
+                "corrected_value": "12",
+                "status": "confirmed",
+                "source": "T21",
+                "note": "",
+            }
+        )
+    df, report = build(dataset_path, corrections_path)
+    row = _get(df, "2025_12k")
+    assert row["voucher_number"] == 12
+    assert ("2025_12k", "voucher_number") in report.correction_mismatches
+
+
 # --- Дубли -----------------------------------------------------------------------------------
 
 

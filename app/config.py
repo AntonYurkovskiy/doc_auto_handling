@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     trocr_device: str = ""
     trocr_max_new_tokens: int = 32
 
+    # Версия замороженных моделей OCR дат/номера (T22): суффикс каталогов моделей
+    # `<OCR_MODELS_DIR>/digits_<v>`, `number_<v>`, и файлов приоров декодера
+    # `<OCR_MODELS_DIR>/{decoder_priors_<v>.json, number_priors_<v>.json, pair_priors_<v>.json}`.
+    # T25/T26 должны передавать её в `app.ocr.runtime` (через `OCR_MODEL_VERSION` в окружении
+    # процесса или параметром `model=` вызовов рантайма) вместо встроенных констант
+    # `DIGITS_MODEL`/`NUMBER_MODEL`.
+    ocr_model_version: str = "v1"
+
 
 settings = Settings()
 

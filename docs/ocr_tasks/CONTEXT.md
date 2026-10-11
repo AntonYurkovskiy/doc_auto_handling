@@ -376,3 +376,11 @@
   теперь в `app/ocr/{digit_values,number_scores}.py` (`ocr_lab.*` — реэкспорт). `onnxruntime==1.29.0` —
   в `requirements.txt`, `onnx`/`matplotlib` — в `requirements-train.txt`. В облаке `mypy` на numpy 2.5
   запускать с `--python-version 3.13`.
+- **2026-10-12 (T22):** переобучение на исправленной истине заморожено как `v1` —
+  `data/ocr/models/{digits_v1,number_v1}/{model.onnx,meta.json,calibration.json}` +
+  `{decoder_priors_v1.json, number_priors_v1.json, pair_priors_v1.json}`. Карточка —
+  `data/ocr/models/MODEL_CARD_v1.md` (закоммичена, остальное в `data/ocr/` — нет).
+  `app.ocr.runtime.DIGITS_MODEL`/`NUMBER_MODEL` теперь зависят от `OCR_MODEL_VERSION`
+  (по умолчанию `"v1"`), в `app/config.py` — `Settings.ocr_model_version = "v1"` (точка
+  расширения для T25/T26, сама интеграция рантайма в приложение ещё не сделана).
+  `ocr_lab/manifest.py` умеет поправки `field=voucher_number` (раньше — только даты).

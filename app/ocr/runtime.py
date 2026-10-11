@@ -44,8 +44,13 @@ from app.ocr.number_scores import (
 
 META_NAME = "meta.json"
 FORMAT_VERSION = 1
-DIGITS_MODEL = "digits_v0"
-NUMBER_MODEL = "number_v0"
+#: Версия моделей по умолчанию — суффикс каталогов `<models_dir>/digits_<v>`, `number_<v>`.
+#: T22 заморозила `v1` (переобучение на исправленной истине). Переопределяется `OCR_MODEL_VERSION`
+#: (приложение пробрасывает её из `Settings.ocr_model_version`, T25/T26); вызовы `predict_digits`/
+#: `predict_number`/`score_number_candidates` могут также передать `model=` явно, в обход констант.
+MODEL_VERSION = os.environ.get("OCR_MODEL_VERSION", "v1")
+DIGITS_MODEL = f"digits_{MODEL_VERSION}"
+NUMBER_MODEL = f"number_{MODEL_VERSION}"
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 

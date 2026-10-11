@@ -679,9 +679,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_err.add_argument("--n", type=int, default=ERRORS_N)
     p_err.add_argument("--out", type=Path, default=None)
 
-    p_prom = sub.add_parser("promote", help="скопировать запуск в digits_v0")
+    p_prom = sub.add_parser("promote", help="скопировать запуск в digits_v0 (или --dest)")
     p_prom.add_argument("--run", required=True)
     p_prom.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
+    p_prom.add_argument("--dest", type=Path, default=V0_DIR,
+                        help="каталог назначения (по умолчанию digits_v0; T22 — digits_v1)")
 
     args = parser.parse_args(argv)
     if args.cmd == "train":
@@ -699,7 +701,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.cmd == "errors":
         errors_sheet(args.run_dir, n=args.n, out=args.out)
     elif args.cmd == "promote":
-        promote(args.run, runs_dir=args.runs_dir)
+        promote(args.run, runs_dir=args.runs_dir, dest=args.dest)
     return 0
 
 

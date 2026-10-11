@@ -690,6 +690,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_train.add_argument("--no-augment", action="store_true")
     p_train.add_argument("--no-init", action="store_true",
                          help="не брать бэкбон из digits_v0 (случайная инициализация)")
+    p_train.add_argument("--digits-checkpoint", type=Path, default=DIGITS_V0,
+                         help="чекпоинт для инициализации бэкбона (по умолчанию digits_v0;"
+                              " T22 — digits_v1/best.pt)")
     p_train.add_argument("--max-minutes", type=float, default=None)
     p_train.add_argument("--resume", action="store_true")
     p_train.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
@@ -706,9 +709,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                        help="аугментированных копий каждого кропа для стресс-теста")
     p_cmp.add_argument("--out", type=Path, default=None)
 
-    p_prom = sub.add_parser("promote", help="скопировать запуск в number_v0")
+    p_prom = sub.add_parser("promote", help="скопировать запуск в number_v0 (или --dest)")
     p_prom.add_argument("--run", required=True)
     p_prom.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
+    p_prom.add_argument("--dest", type=Path, default=V0_DIR,
+                        help="каталог назначения (по умолчанию number_v0; T22 — number_v1)")
 
     args = parser.parse_args(argv)
     if args.cmd == "train":
@@ -720,7 +725,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_workers=args.workers,
         )
         return train(cfg, runs_dir=args.runs_dir, max_minutes=args.max_minutes,
-                     resume=args.resume)
+                     resume=args.resume, digits_checkpoint=args.digits_checkpoint)
     if args.cmd == "predict":
         predict(args.run_dir, args.split, source=args.source)
     elif args.cmd == "compare":
@@ -730,7 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths.ensure_dir(args.out.parent)
             args.out.write_text(table + "\n", encoding="utf-8")
     elif args.cmd == "promote":
-        promote(args.run, runs_dir=args.runs_dir)
+        promote(args.run, runs_dir=args.runs_dir, dest=args.dest)
     return 0
 
 
