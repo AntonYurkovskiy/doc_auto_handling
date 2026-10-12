@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -26,9 +27,11 @@ from app.models import (
     Voucher,
     VoucherFieldPrediction,
 )
+from app.ocr.pipeline import crop_output_dir
 from app.services.voucher_files import resolve_stored_file, safe_basename, store_upload
 
 PDF_BYTES = b"%PDF-1.4\ntest voucher scan\n%%EOF\n"
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"test crop"
 
 
 @pytest.fixture
@@ -36,6 +39,13 @@ def vouchers_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     folder = tmp_path / "incoming" / "vouchers"
     folder.mkdir(parents=True)
     monkeypatch.setattr(settings, "incoming_vouchers_dir", folder)
+    return folder
+
+
+@pytest.fixture
+def crops_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    folder = tmp_path / "ocr_crops"
+    monkeypatch.setattr(settings, "ocr_crops_dir", folder)
     return folder
 
 
@@ -340,3 +350,164 @@ def test_confirm_links_voucher_to_application_portcall_and_operation(
         assert participant.voucher_id == voucher_id
     finally:
         db.close()
+
+
+# --- T27: карточка проверки — top-3, кропы, плашка уверенности, фильтр списка -----------
+
+
+def test_voucher_card_renders_with_topk_candidates(
+    client: TestClient, session_factory: sessionmaker[Session], vouchers_dir: Path
+) -> None:
+    """Карточка с `topk` показывает кнопки-кандидаты и подсветку уверенности."""
+    voucher_id = _upload(client)
+
+    db = session_factory()
+    try:
+        prediction = db.scalar(
+            select(VoucherFieldPrediction).where(
+                VoucherFieldPrediction.voucher_id == voucher_id,
+                VoucherFieldPrediction.field_name == "voucher_number",
+            )
+        )
+        assert prediction is not None
+        prediction.predicted_value = "262"
+        prediction.confidence = 0.97
+        prediction.topk = json.dumps([["262", 0.97], ["282", 0.02], ["202", 0.01]])
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.get(f"/vouchers/{voucher_id}")
+    assert response.status_code == 200
+    assert '<div class="ocr-candidates"' in response.text
+    assert "conf-high" in response.text
+    assert "262" in response.text
+
+
+def test_voucher_card_renders_without_topk_like_before(
+    client: TestClient, session_factory: sessionmaker[Session], vouchers_dir: Path
+) -> None:
+    """Без `topk` карточка по-прежнему рендерится (критерий приёмки T27)."""
+    voucher_id = _upload(client)
+
+    response = client.get(f"/vouchers/{voucher_id}")
+    assert response.status_code == 200
+    assert '<div class="ocr-candidates"' not in response.text
+    assert 'name="number"' in response.text
+
+
+def test_voucher_crop_serves_file_from_ocr_crops_dir(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    vouchers_dir: Path,
+    crops_dir: Path,
+) -> None:
+    voucher_id = _upload(client, "262k.pdf")
+
+    db = session_factory()
+    try:
+        voucher = db.get(Voucher, voucher_id)
+        assert voucher is not None and voucher.file_path
+        out_dir = crop_output_dir(voucher.file_path, crops_dir)
+    finally:
+        db.close()
+    out_dir.mkdir(parents=True)
+    (out_dir / "voucher_number.png").write_bytes(PNG_BYTES)
+    (out_dir / "left_base.day.png").write_bytes(PNG_BYTES)
+
+    response = client.get(f"/vouchers/{voucher_id}/crops/voucher_number")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == PNG_BYTES
+
+    response = client.get(f"/vouchers/{voucher_id}/crops/left_base.day")
+    assert response.status_code == 200
+    assert response.content == PNG_BYTES
+
+
+def test_voucher_crop_rejects_unknown_subfield_name(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    vouchers_dir: Path,
+    crops_dir: Path,
+) -> None:
+    voucher_id = _upload(client, "262k.pdf")
+
+    db = session_factory()
+    try:
+        voucher = db.get(Voucher, voucher_id)
+        assert voucher is not None and voucher.file_path
+        out_dir = crop_output_dir(voucher.file_path, crops_dir)
+    finally:
+        db.close()
+    out_dir.mkdir(parents=True)
+    (out_dir / "voucher_number.png").write_bytes(PNG_BYTES)
+
+    # Посторонние имена подполей — отказ ещё до обращения к диску (`..` в один сегмент
+    # пути нормализует уже HTTP-клиент, поэтому обход каталога отдельно проверяет
+    # test_voucher_crop_rejects_path_traversal через закодированный слэш).
+    assert client.get(f"/vouchers/{voucher_id}/crops/left_base").status_code == 404
+    assert client.get(f"/vouchers/{voucher_id}/crops/evil.png").status_code == 404
+
+
+def test_voucher_crop_rejects_path_traversal(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+    vouchers_dir: Path,
+    crops_dir: Path,
+) -> None:
+    crops_dir.mkdir(parents=True)
+    secret = crops_dir.parent / "secret.png"
+    secret.write_bytes(PNG_BYTES)
+
+    voucher_id = _upload(client, "262k.pdf")
+
+    # Закодированный обход каталога в имени подполя — не входит в SUBFIELD_NAMES.
+    assert client.get(
+        f"/vouchers/{voucher_id}/crops/%2e%2e%2fsecret.png"
+    ).status_code == 404
+    assert client.get("/vouchers/999999/crops/voucher_number").status_code == 404
+
+
+def test_vouchers_list_filter_by_review_status(
+    client: TestClient, session_factory: sessionmaker[Session], vouchers_dir: Path
+) -> None:
+    db = session_factory()
+    try:
+        confident = Voucher(
+            status=DocStatus.needs_review,
+            number="1",
+            ocr_status="ok",
+            ocr_confidence=0.9999,
+        )
+        needs_review = Voucher(
+            status=DocStatus.needs_review,
+            number="2",
+            ocr_status="ok",
+            ocr_confidence=0.5,
+        )
+        unavailable = Voucher(status=DocStatus.needs_review, number="3", ocr_status="no_models")
+        db.add_all([confident, needs_review, unavailable])
+        db.commit()
+        confident_id, needs_review_id, unavailable_id = (
+            confident.id,
+            needs_review.id,
+            unavailable.id,
+        )
+    finally:
+        db.close()
+
+    all_response = client.get("/vouchers")
+    assert all_response.status_code == 200
+    for voucher_id in (confident_id, needs_review_id, unavailable_id):
+        assert f"/vouchers/{voucher_id}" in all_response.text
+
+    confident_response = client.get("/vouchers?review=confident")
+    assert f"/vouchers/{confident_id}" in confident_response.text
+    assert f"/vouchers/{needs_review_id}" not in confident_response.text
+    assert f"/vouchers/{unavailable_id}" not in confident_response.text
+
+    needs_response = client.get("/vouchers?review=needs")
+    assert f"/vouchers/{confident_id}" not in needs_response.text
+    assert f"/vouchers/{needs_review_id}" in needs_response.text
+    assert f"/vouchers/{unavailable_id}" in needs_response.text

@@ -29,3 +29,21 @@ input, select, textarea { width: 100%; padding: 6px 8px; border: 1px solid #b9c2
 .voucher-review .preview img { max-width: 100%; border: 1px solid #d5dbe2; }
 .voucher-review .fields { flex: 1 1 420px; min-width: 300px; }
 .voucher-review form.grid { grid-template-columns: 180px 1fr; max-width: none; }
+
+/* T27: плашка уровня ваучера и подсветка уверенности полей в карточке проверки */
+.ocr-badge { display: inline-block; font-size: 13px; padding: 4px 10px; border-radius: 10px; }
+.ocr-badge--confident { background: #dcf5e1; color: #1d6b3a; }
+.ocr-badge--review { background: #fff3d6; color: #8a5a00; }
+.ocr-badge--unavailable { background: #e2e8f0; color: #5a6b7f; }
+.quick-field { display: flex; flex-direction: column; gap: 4px; }
+.ocr-crops { display: flex; gap: 4px; flex-wrap: wrap; }
+.ocr-crop { height: 36px; border: 1px solid #b9c2cd; border-radius: 3px; background: #fff; }
+.ocr-candidates { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn-candidate {
+    background: #eaeef3; border: 1px solid #b9c2cd; border-radius: 4px;
+    padding: 2px 8px; font-size: 12px; cursor: pointer;
+}
+.btn-candidate:hover { background: #d5dbe2; }
+input.conf-high { border-color: #2e9e4f; box-shadow: 0 0 0 1px #2e9e4f inset; }
+input.conf-medium { border-color: #d19a00; box-shadow: 0 0 0 1px #d19a00 inset; }
+input.conf-low { border-color: #c0392b; box-shadow: 0 0 0 1px #c0392b inset; }

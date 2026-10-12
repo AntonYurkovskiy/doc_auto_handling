@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     # флага не подтверждено человеком, см. вопрос в PROGRESS.md (T26).
     ocr_auto_confirm: bool = False
 
+    # T27: пороги подсветки уверенности отдельного поля в карточке проверки
+    # (`confidence` предсказания из `VoucherFieldPrediction.confidence`, не путать с
+    # `ocr_auto_accept_threshold` — тот про вероятность записи целиком). confidence >=
+    # high — «высокая» (зелёная), [low, high) — «средняя» (жёлтая), < low — «низкая»
+    # (красная). Решение этой сессии без ответа человека — разумные значения по
+    # умолчанию для доли вероятности кандидата из topk, см. PROGRESS.md (T27).
+    ocr_confidence_high_threshold: float = 0.9
+    ocr_confidence_low_threshold: float = 0.5
+
 
 settings = Settings()
 

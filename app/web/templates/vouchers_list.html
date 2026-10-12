@@ -13,12 +13,18 @@
         <button class="btn secondary" type="submit">Загрузить скан</button>
     </form>
 </div>
+<div class="actions">
+    <a class="btn{{ ' secondary' if review != 'all' else '' }}" href="/vouchers">Все</a>
+    <a class="btn{{ ' secondary' if review != 'needs' else '' }}" href="/vouchers?review=needs">Нужна проверка</a>
+    <a class="btn{{ ' secondary' if review != 'confident' else '' }}" href="/vouchers?review=confident">Уверенно</a>
+</div>
 <table>
     <tr>
         <th>#</th><th>№</th><th>Буксир</th><th>Судно</th><th>Вид работ</th>
-        <th>Начало</th><th>Окончание</th><th>Статус</th><th></th>
+        <th>Начало</th><th>Окончание</th><th>Статус</th><th>Уверенность OCR</th><th></th>
     </tr>
     {% for v in items %}
+    {% set badge = ocr_badge(v) %}
     <tr>
         <td>{{ v.id }}</td>
         <td>{{ v.number or "—" }}</td>
@@ -28,6 +34,10 @@
         <td>{{ v.started_dt.strftime("%d.%m.%Y %H:%M") if v.started_dt else "—" }}</td>
         <td>{{ v.finished_dt.strftime("%d.%m.%Y %H:%M") if v.finished_dt else "—" }}</td>
         <td><span class="status">{{ v.status.value }}</span></td>
+        <td>
+            <span class="ocr-badge ocr-badge--{{ badge[0] }}">{{ badge[1] }}</span>
+            {% if v.ocr_confidence is not none %}<br><small>{{ "%.1f"|format(v.ocr_confidence * 100) }}%</small>{% endif %}
+        </td>
         <td><a href="/vouchers/{{ v.id }}">Открыть</a></td>
     </tr>
     {% endfor %}

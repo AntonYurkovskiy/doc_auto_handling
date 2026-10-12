@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -10,8 +11,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import DocStatus, Tug, Voucher, VoucherFieldPrediction, VoucherRegion
-from app.ocr.pipeline import STATUS_OK
+from app.ocr.layouts import DATE_PARTS, VOUCHER_NUMBER
+from app.ocr.pipeline import STATUS_OK, crop_output_dir
 from app.services.voucher_linking import link_voucher
+
+#: Формат даты/времени в `VoucherFieldPrediction.topk` — совпадает с
+#: `app.services.voucher.DATETIME_FORMAT`. Продублирован (не импортирован), чтобы не
+#: замкнуть модули друг на друга (см. `voucher_ocr.py`, тот же приём).
+_CANDIDATE_DATETIME_FORMAT = "%Y-%m-%d %H:%M"
 
 
 @dataclass(frozen=True)
@@ -142,3 +149,157 @@ def apply_auto_accept(db: Session, voucher: Voucher) -> None:
     link_voucher(db, voucher, voucher.application)
     voucher.status = DocStatus.confirmed
     voucher.reviewed_at = datetime.utcnow()
+
+
+# ---------------------------------------------------------------------------
+# T27: карточка проверки — плашка уверенности, кропы и кнопки top-3
+# ---------------------------------------------------------------------------
+
+
+def voucher_ocr_badge(voucher: Voucher) -> tuple[str, str]:
+    """Плашка уровня ваучера для карточки/списка: (css-класс, текст).
+
+    Три состояния из промпта T27: «Распознано уверенно» (та же формула, что
+    `voucher_auto_accept`), «Нужна проверка» (пайплайн отработал, но не прошёл
+    порог автоприёма) и «Распознавание недоступно» (пайплайн не вызывался,
+    не дал `status="ok"` или ваучер ещё не распознавался — `ocr_status is None`).
+    """
+    if voucher.ocr_status != STATUS_OK:
+        return "unavailable", "Распознавание недоступно"
+    if voucher_auto_accept(voucher):
+        return "confident", "Распознано уверенно"
+    return "review", "Нужна проверка"
+
+
+def voucher_needs_review(voucher: Voucher) -> bool:
+    """Фильтр списка `/vouchers` (T27): True — ваучер уходит в очередь проверки.
+
+    Включает и «нужна проверка», и «распознавание недоступно» — оператору в
+    обоих случаях нужно проверить ваучер вручную; строгое разделение на три
+    состояния остаётся только в плашке (`voucher_ocr_badge`).
+    """
+    return not voucher_auto_accept(voucher)
+
+
+def field_confidence_level(confidence: float | None) -> str:
+    """Категория уверенности поля для подсветки (T27): high/medium/low/unknown.
+
+    Пороги — `settings.ocr_confidence_high_threshold`/`ocr_confidence_low_threshold`
+    (не путать с `settings.ocr_auto_accept_threshold` — тот про запись целиком).
+    """
+    if confidence is None:
+        return "unknown"
+    if confidence >= settings.ocr_confidence_high_threshold:
+        return "high"
+    if confidence >= settings.ocr_confidence_low_threshold:
+        return "medium"
+    return "low"
+
+
+def _format_candidate(field_name: str, raw_value: str) -> tuple[str, str]:
+    """(значение для `<input>`, подпись на кнопке) для одного кандидата top-k."""
+    if field_name == VOUCHER_NUMBER:
+        return raw_value, raw_value
+    try:
+        parsed = datetime.strptime(raw_value, _CANDIDATE_DATETIME_FORMAT)
+    except ValueError:
+        return raw_value, raw_value
+    return parsed.strftime("%Y-%m-%dT%H:%M"), parsed.strftime("%d.%m.%Y %H:%M")
+
+
+@dataclass(frozen=True)
+class QuickFieldCandidate:
+    """Один кандидат top-k — кнопка быстрого выбора значения поля (T27)."""
+
+    input_value: str
+    label: str
+    probability: float | None
+
+
+@dataclass(frozen=True)
+class QuickField:
+    """Поле карточки с кропами подполей и кнопками top-3 (T27): номер и 4 строки дат.
+
+    `crop_names` — только те подполя (`app.ocr.layouts.SUBFIELD_NAMES`), для которых
+    на диске реально нашёлся файл кропа (отдаются через `/vouchers/{id}/crops/<имя>`).
+    """
+
+    field_name: str
+    input_name: str
+    label: str
+    crop_names: tuple[str, ...]
+    confidence: float | None
+    confidence_level: str
+    candidates: tuple[QuickFieldCandidate, ...]
+
+
+#: (имя поля в VoucherFieldPrediction, имя <input> формы, подпись).
+_QUICK_FIELD_DEFS: tuple[tuple[str, str, str], ...] = (
+    (VOUCHER_NUMBER, "number", "№ ваучера"),
+    ("left_base", "left_base_dt", "Выход из базы"),
+    ("arrived_base", "arrived_base_dt", "Приход в базу"),
+    ("started_work", "started_dt", "Начало работ"),
+    ("finished_work", "finished_dt", "Окончание работ"),
+)
+
+
+def _crop_names(field_name: str) -> tuple[str, ...]:
+    if field_name == VOUCHER_NUMBER:
+        return (VOUCHER_NUMBER,)
+    return tuple(f"{field_name}.{part}" for part in DATE_PARTS)
+
+
+def _topk_candidates(
+    field_name: str, prediction: VoucherFieldPrediction | None
+) -> tuple[QuickFieldCandidate, ...]:
+    if prediction is None or not prediction.topk:
+        return ()
+    try:
+        raw = json.loads(prediction.topk)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(raw, list):
+        return ()
+    candidates: list[QuickFieldCandidate] = []
+    for item in raw[:3]:
+        if not isinstance(item, list | tuple) or len(item) != 2:
+            continue
+        value, probability = item
+        input_value, label = _format_candidate(field_name, str(value))
+        candidates.append(
+            QuickFieldCandidate(
+                input_value=input_value,
+                label=label,
+                probability=float(probability) if isinstance(probability, int | float) else None,
+            )
+        )
+    return tuple(candidates)
+
+
+def quick_fields(voucher: Voucher) -> tuple[QuickField, ...]:
+    """Кропы и кнопки top-3 для номера ваучера и 4 строк дат (T27)."""
+    predictions = predictions_by_field(voucher)
+    crop_dir = (
+        crop_output_dir(voucher.file_path, settings.ocr_crops_dir) if voucher.file_path else None
+    )
+    result: list[QuickField] = []
+    for field_name, input_name, label in _QUICK_FIELD_DEFS:
+        prediction = predictions.get(field_name)
+        confidence = prediction.confidence if prediction else None
+        available_crops = tuple(
+            name
+            for name in _crop_names(field_name)
+            if crop_dir is not None and (crop_dir / f"{name}.png").is_file()
+        )
+        result.append(
+            QuickField(
+                field_name=field_name,
+                input_name=input_name,
+                label=label,
+                crop_names=available_crops,
+                confidence=confidence,
+                confidence_level=field_confidence_level(confidence),
+                candidates=_topk_candidates(field_name, prediction),
+            )
+        )
+    return tuple(result)

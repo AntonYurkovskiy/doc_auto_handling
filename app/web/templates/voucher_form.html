@@ -1,7 +1,35 @@
 {% extends "base.html" %}
 {% macro dtval(v) %}{{ v.strftime("%Y-%m-%dT%H:%M") if v else "" }}{% endmacro %}
+{% macro crops(qf) %}
+{% if qf and qf.crop_names %}
+<div class="ocr-crops">
+    {% for crop in qf.crop_names %}
+    <img class="ocr-crop" src="/vouchers/{{ item.id }}/crops/{{ crop }}" alt="Кроп {{ crop }}" title="{{ crop }}">
+    {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+{% macro candidates(qf) %}
+{% if qf and qf.candidates %}
+<div class="ocr-candidates" data-for="{{ qf.input_name }}">
+    {% for c in qf.candidates %}
+    <button type="button" class="btn-candidate" data-value="{{ c.input_value }}">
+        {{ c.label }}{% if c.probability is not none %} <small>{{ "%.0f"|format(c.probability * 100) }}%</small>{% endif %}
+    </button>
+    {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+{% macro conf_class(qf) %}{{ ("conf-" ~ qf.confidence_level) if qf else "" }}{% endmacro %}
 {% block content %}
 <h1>{{ "Ваучер #" ~ item.id if item else "Новый ваучер" }}</h1>
+
+{% if ocr_badge %}
+<p class="ocr-badge ocr-badge--{{ ocr_badge[0] }}">
+    {{ ocr_badge[1] }}
+    {% if item.ocr_confidence is not none %}<small>({{ "%.1f"|format(item.ocr_confidence * 100) }}%)</small>{% endif %}
+</p>
+{% endif %}
 
 <div class="voucher-review">
     <section class="preview card">
@@ -32,8 +60,13 @@
         <form class="grid" id="voucher-form" action="/vouchers" method="post">
             {% if item %}<input type="hidden" name="voucher_id" value="{{ item.id }}">{% endif %}
 
+            {% set qf_number = quick_fields.get("number") %}
             <label>№ ваучера</label>
-            <input name="number" value="{{ item.number or '' if item else '' }}">
+            <div class="quick-field" data-field="number">
+                {{ crops(qf_number) }}
+                <input name="number" value="{{ item.number or '' if item else '' }}" class="{{ conf_class(qf_number) }}">
+                {{ candidates(qf_number) }}
+            </div>
 
             <label>Буксир</label>
             <select name="tug_id">
@@ -70,17 +103,41 @@
             <input name="work_type" value="{{ item.work_type or '' if item else '' }}"
                    placeholder="Швартовка / Отшвартовка / Обслуживание морских сооружений ...">
 
+            {% set qf_left_base = quick_fields.get("left_base_dt") %}
             <label>Выход из базы</label>
-            <input type="datetime-local" name="left_base_dt" value="{{ dtval(item.left_base_dt) if item else '' }}">
+            <div class="quick-field" data-field="left_base_dt">
+                {{ crops(qf_left_base) }}
+                <input type="datetime-local" name="left_base_dt" value="{{ dtval(item.left_base_dt) if item else '' }}"
+                       class="{{ conf_class(qf_left_base) }}">
+                {{ candidates(qf_left_base) }}
+            </div>
 
+            {% set qf_arrived_base = quick_fields.get("arrived_base_dt") %}
             <label>Приход в базу</label>
-            <input type="datetime-local" name="arrived_base_dt" value="{{ dtval(item.arrived_base_dt) if item else '' }}">
+            <div class="quick-field" data-field="arrived_base_dt">
+                {{ crops(qf_arrived_base) }}
+                <input type="datetime-local" name="arrived_base_dt" value="{{ dtval(item.arrived_base_dt) if item else '' }}"
+                       class="{{ conf_class(qf_arrived_base) }}">
+                {{ candidates(qf_arrived_base) }}
+            </div>
 
+            {% set qf_started = quick_fields.get("started_dt") %}
             <label>Начало работ</label>
-            <input type="datetime-local" name="started_dt" value="{{ dtval(item.started_dt) if item else '' }}">
+            <div class="quick-field" data-field="started_dt">
+                {{ crops(qf_started) }}
+                <input type="datetime-local" name="started_dt" value="{{ dtval(item.started_dt) if item else '' }}"
+                       class="{{ conf_class(qf_started) }}">
+                {{ candidates(qf_started) }}
+            </div>
 
+            {% set qf_finished = quick_fields.get("finished_dt") %}
             <label>Окончание работ</label>
-            <input type="datetime-local" name="finished_dt" value="{{ dtval(item.finished_dt) if item else '' }}">
+            <div class="quick-field" data-field="finished_dt">
+                {{ crops(qf_finished) }}
+                <input type="datetime-local" name="finished_dt" value="{{ dtval(item.finished_dt) if item else '' }}"
+                       class="{{ conf_class(qf_finished) }}">
+                {{ candidates(qf_finished) }}
+            </div>
 
             <label>Совместно с (буксиры)</label>
             <input name="joint_with" value="{{ item.joint_with or '' if item else '' }}"
@@ -110,6 +167,8 @@
             </div>
         </form>
         <p class="muted">«Сохранить» оставляет статус needs_review, «Распознать» перезапускает OCR и вставляет значения, «Подтвердить» фиксирует значения полей.</p>
+        <p class="muted">Кнопки под полем — кандидаты OCR по убыванию вероятности, клик подставляет значение. Поле в
+            фокусе: Alt+1 / Alt+2 / Alt+3 выбирают первый/второй/третий кандидат.</p>
     </section>
 </div>
 
@@ -126,5 +185,31 @@
     </tr>
     {% endfor %}
 </table>
+{% endif %}
+
+{% if quick_fields %}
+<script>
+(function () {
+    document.addEventListener("click", function (event) {
+        var button = event.target.closest(".btn-candidate");
+        if (!button) return;
+        var group = button.closest(".ocr-candidates");
+        var input = document.getElementsByName(group.dataset.for)[0];
+        if (input) input.value = button.dataset.value;
+    });
+    document.addEventListener("keydown", function (event) {
+        if (!event.altKey) return;
+        var index = {"1": 0, "2": 1, "3": 2}[event.key];
+        if (index === undefined) return;
+        var field = document.activeElement && document.activeElement.closest(".quick-field");
+        if (!field) return;
+        var buttons = field.querySelectorAll(".btn-candidate");
+        if (buttons[index]) {
+            buttons[index].click();
+            event.preventDefault();
+        }
+    });
+})();
+</script>
 {% endif %}
 {% endblock %}

@@ -537,12 +537,21 @@ def _write_png(path: Path, image: np.ndarray) -> None:
     path.write_bytes(buf.tobytes())
 
 
+def crop_output_dir(scan_path: str | Path, crops_dir: Path) -> Path:
+    """Каталог сохранённых кропов конкретного скана: `<crops_dir>/<безопасное имя без
+    расширения>/`. Та же схема имён, что :func:`_save_crops` использует при сохранении —
+    публичная версия нужна T27 (`/vouchers/{id}/crops/{subfield}`), чтобы не дублировать
+    схему имён в приложении.
+    """
+    stem = Path(safe_basename(Path(scan_path).name)).stem
+    return crops_dir / stem
+
+
 def _save_crops(
     scan_path: Path, crops: Mapping[str, np.ndarray], crops_dir: Path
 ) -> dict[str, Path]:
     """Сохраняет кропы подполей в `<crops_dir>/<безопасное имя скана без расширения>/`."""
-    stem = Path(safe_basename(scan_path.name)).stem
-    out_dir = crops_dir / stem
+    out_dir = crop_output_dir(scan_path, crops_dir)
     out: dict[str, Path] = {}
     for name, crop in crops.items():
         dest = out_dir / f"{name}.png"

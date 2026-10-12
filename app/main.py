@@ -31,7 +31,8 @@ from app.models import (
     Voucher,
     Work,
 )
-from app.ocr.pipeline import get_resources
+from app.ocr.layouts import SUBFIELD_NAMES
+from app.ocr.pipeline import crop_output_dir, get_resources
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
@@ -51,6 +52,9 @@ from app.services.voucher_fields import (
     apply_predictions_to_voucher,
     confirm_fields,
     predictions_by_field,
+    quick_fields,
+    voucher_needs_review,
+    voucher_ocr_badge,
 )
 from app.services.voucher_files import (
     media_type_for,
@@ -273,7 +277,13 @@ def mail_fetch(
         items = db.query(Voucher).order_by(Voucher.id.desc()).all()
         return templates.TemplateResponse(
             "vouchers_list.html",
-            {"request": request, "items": items, "mail_message": mail_message},
+            {
+                "request": request,
+                "items": items,
+                "mail_message": mail_message,
+                "review": "all",
+                "ocr_badge": voucher_ocr_badge,
+            },
         )
 
     items = db.query(Application).order_by(Application.id.desc()).all()
@@ -378,10 +388,27 @@ def application_detail(app_id: int, request: Request, db: Session = Depends(get_
 
 
 # --- Ваучеры ----------------------------------------------------------------
+#: Значения query-параметра `review` для фильтра списка (T27).
+REVIEW_FILTER_NEEDS = "needs"
+REVIEW_FILTER_CONFIDENT = "confident"
+
+
 @app.get("/vouchers", response_class=HTMLResponse)
-def vouchers_list(request: Request, db: Session = Depends(get_db)):
+def vouchers_list(request: Request, db: Session = Depends(get_db), review: str = "all"):
     items = db.query(Voucher).order_by(Voucher.id.desc()).all()
-    return templates.TemplateResponse("vouchers_list.html", {"request": request, "items": items})
+    if review == REVIEW_FILTER_NEEDS:
+        items = [v for v in items if voucher_needs_review(v)]
+    elif review == REVIEW_FILTER_CONFIDENT:
+        items = [v for v in items if not voucher_needs_review(v)]
+    return templates.TemplateResponse(
+        "vouchers_list.html",
+        {
+            "request": request,
+            "items": items,
+            "review": review,
+            "ocr_badge": voucher_ocr_badge,
+        },
+    )
 
 
 @app.get("/vouchers/new", response_class=HTMLResponse)
@@ -396,6 +423,8 @@ def voucher_new(request: Request, db: Session = Depends(get_db)):
             "preview": "none",
             "voucher_file_url": None,
             "fields": [],
+            "quick_fields": {},
+            "ocr_badge": None,
             "applications": db.query(Application).order_by(Application.id.desc()).all(),
         },
     )
@@ -540,6 +569,27 @@ def voucher_file_by_name(filename: str):
     return FileResponse(path, media_type=media_type_for(path), content_disposition_type="inline")
 
 
+@app.get("/vouchers/{voucher_id}/crops/{subfield}")
+def voucher_crop(voucher_id: int, subfield: str, db: Session = Depends(get_db)):
+    """Кроп одного подполя (T27): только разрешённые имена, только из `settings.ocr_crops_dir`.
+
+    `subfield` — одно из `app.ocr.layouts.SUBFIELD_NAMES` (`voucher_number` или
+    `<строка>.<часть>`); посторонние имена и обход каталога (`..`) отклоняются до
+    обращения к диску — `resolve_stored_file` дополнительно защищает сам путь.
+    """
+    if subfield not in SUBFIELD_NAMES:
+        raise HTTPException(status_code=404, detail="Неизвестное подполе")
+    item = db.get(Voucher, voucher_id)
+    if item is None or not item.file_path:
+        raise HTTPException(status_code=404, detail="Ваучер не найден")
+    crop_dir_name = crop_output_dir(item.file_path, settings.ocr_crops_dir).name
+    try:
+        path = resolve_stored_file(f"{crop_dir_name}/{subfield}.png", settings.ocr_crops_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path, media_type="image/png", content_disposition_type="inline")
+
+
 @app.get("/vouchers/{voucher_id}", response_class=HTMLResponse)
 def voucher_detail(voucher_id: int, request: Request, db: Session = Depends(get_db)):
     item = db.get(Voucher, voucher_id)
@@ -568,6 +618,8 @@ def voucher_detail(voucher_id: int, request: Request, db: Session = Depends(get_
             "preview": preview,
             "voucher_file_url": file_url,
             "fields": [(field, predictions.get(field.name)) for field in VOUCHER_FIELDS],
+            "quick_fields": {qf.input_name: qf for qf in quick_fields(item)},
+            "ocr_badge": voucher_ocr_badge(item),
             "applications": db.query(Application).order_by(Application.id.desc()).all(),
         },
     )
