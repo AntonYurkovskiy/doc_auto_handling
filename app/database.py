@@ -84,6 +84,11 @@ def _add_missing_columns() -> None:
             ("operation_id", "INTEGER"),
             ("predicted_at", "DATETIME"),
             ("reviewed_at", "DATETIME"),
+            ("ocr_status", "VARCHAR(20)"),
+            ("ocr_confidence", "FLOAT"),
+        ],
+        "voucher_field_predictions": [
+            ("topk", "TEXT"),
         ],
     }
     with engine.begin() as conn:

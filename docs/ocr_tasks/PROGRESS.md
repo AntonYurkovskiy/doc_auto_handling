@@ -2723,3 +2723,141 @@
     `app.services.voucher.*` (кроме `voucher_files.safe_basename`, он не тянет SQLAlchemy/
     torch) — если T26 захочет добавить больше контекста в `RecognitionContext`, собирать
     его в слое приложения, а не внутри `app/ocr/`.
+
+## T26 — Интеграция в `voucher_ocr.py`, `voucher.py` и БД (2026-10-13)
+- Статус: готово
+- Сделано:
+  - `app/services/voucher_ocr.py`: `ocr_voucher_regions(db, voucher, application=None)` —
+    печатные поля (`tugboat`, `vessel`, `agent`, `work_type`, `remarks`,
+    `joint_with_line_1/2`) по-прежнему Tesseract по регионам шаблона; 4 строки дат и
+    `voucher_number` — `app.ocr.pipeline.recognize_voucher` (T25). Новые
+    `OcrFieldValue` (текст/уверенность/топ-k) и `VoucherOcrResult` (поля + сырой
+    `VoucherRecognition`, нужен для статуса ваучера). `build_recognition_context` —
+    год (поля ваучера → время заявки → сегодня), вид работ, история номеров
+    (`predict_next` + подсчёт занятых по буксиру/году) и пара (`ConfirmedPartner`/
+    `PendingPartner` по другому ваучеру той же заявки). TrOCR полностью убран из
+    `ocr_voucher_regions` (не вызывается вовсе); `voucher_trocr.py` не тронут и
+    остаётся для ручного сравнения качества, если понадобится.
+  - `app/services/voucher.py`: `FieldPrediction`/`VoucherFieldPrediction` получили
+    `topk` (JSON `[[значение, вероятность], ...]`); `predict_fields` берёт OCR из
+    `OcrFieldValue` (текст + топ-k в кандидатах), `source="ocr"` как и раньше;
+    `predict_and_store` вызывает `ocr_voucher_regions(db, voucher, application)` и
+    выставляет `Voucher.ocr_status`/`ocr_confidence` из результата пайплайна.
+    `candidate_datetimes`/`DATE_WINDOW_DAYS`/`MINUTE_STEP` **оставлены** как запасной
+    источник кандидатов дат, когда пайплайн недоступен/не прошёл выравнивание —
+    `_application_datetime`/`_work_type_from_application` переехали в `voucher_ocr.py`
+    (там же нужны для контекста пайплайна), в `voucher.py` — импорт под старыми
+    именами, код вызовов не менялся.
+  - `app/services/voucher_fields.py`: `voucher_auto_accept(voucher)` и
+    `apply_auto_accept(db, voucher)` — автоприём высокой уверенности (DECISIONS Q3):
+    `apply_predictions_to_voucher` всегда при `confidence ≥ ocr_auto_accept_threshold`;
+    статус меняется на `confirmed` только при `APP_OCR_AUTO_CONFIRM=true` (выключен по
+    умолчанию). Вызывается из `/vouchers/upload` (`main.py`) и из приёма по почте
+    (`imap_ingest._ingest_voucher_message`) — иначе автоприём работал бы только для
+    ручной загрузки через форму, а не для писем.
+  - `app/models.py` + `app/database.py`: `Voucher.ocr_status` (VARCHAR 20),
+    `Voucher.ocr_confidence` (FLOAT), `VoucherFieldPrediction.topk` (TEXT/JSON) —
+    добавлены в `_add_missing_columns` (идемпотентно).
+  - `app/config.py`: `trocr_enabled` по умолчанию `False` (был `True` — TrOCR больше не
+    в рабочем пути); новый `ocr_auto_confirm: bool = False` (`APP_OCR_AUTO_CONFIRM`).
+  - `app/main.py`: `_warm_up_ocr()` при старте приложения грузит ресурсы пайплайна
+    (`get_resources` с путями/версией из `Settings`) один раз, чтобы первый ваучер не
+    ждал прогрев (~2 с, см. T25); `voucher_upload` зовёт `apply_auto_accept` после
+    `predict_and_store`.
+  - Тесты: `tests/test_voucher_ocr.py` переписан под новый контракт (34 теста: печать/
+    пайплайн по отдельности и вместе, статусы `no_models`/`align_failed`/выключенный
+    `ocr_enabled`, `build_recognition_context` — год/вид работ/история номеров/пара
+    подтверждённая и ожидающая, `predict_fields`/`predict_and_store` с топ-k и
+    `ocr_status`/`ocr_confidence`); новый `tests/test_voucher_fields.py` (4 теста на
+    `voucher_auto_accept`/`apply_auto_accept`, оба состояния флага); новый
+    `tests/test_database_migration.py` (3 теста: добавление колонок на старой схеме,
+    идемпотентность `_add_missing_columns`, идемпотентность полного `init_db`, в т.ч.
+    эталонный шаблон не дублируется).
+- Цифры:
+  - Полный `pytest -q`: **620 passed, 3 skipped** (пропуски — старые, не из этой
+    задачи), `ruff check .` — чисто, `mypy app` — те же 4 преэкзистентные ошибки, что и
+    до задачи (сверено `git stash`/`git stash pop`), новых нет.
+  - Ручная проверка через `TestClient` (без изменения `data/app.db` — отдельная
+    временная SQLite БД и временные каталоги): 3 реальных скана `test`
+    (`2026_218k`, `2026_219k`, `2026_220k`, `E:\projects\doc_auto_handling\data\
+    historical\vauchers\2026\`) — все три загрузились, карточка отдаёт 200,
+    `voucher.ocr_status == "ok"` у всех трёх, `ocr_confidence` — 0,99997 / 0,99884 /
+    0,99922; предсказания строк дат (`left_base`, `started_work`, …) — `source="ocr"`
+    у всех трёх (т.е. пайплайн T25 реально отработал на реальных файлах, а не ушёл в
+    приор). Порог автоприёма по умолчанию 0,9995 — один скан выше (авто-предзаполнение
+    сработало бы), два — чуть ниже.
+  - Миграция проверена и на копии реальной `data/app.db` (`cp` во временный файл,
+    `APP_DATABASE_URL=sqlite:///...`): `init_db()` дважды подряд — колонки добавились,
+    второй прогон не упал и ничего не поменял; оригинал `data/app.db` не трогался
+    (размер/время изменения до и после идентичны).
+- Решения без человека:
+  - TrOCR убран из рабочего пути полностью (не частично за флагом сравнения): раз он
+    всё равно не используется в предсказаниях, флаг «сравнения» внутри
+    `ocr_voucher_regions` не добавлял ценности, только усложнял код. `voucher_trocr.py`
+    и зависимости `torch`/`transformers` в `requirements.txt` не трогал — вопрос ниже.
+  - Год контекста (`DecodeContext.year`) без «печати бланка» (её ещё нет в проекте):
+    приоритет — уже известные поля самого ваучера (`started_dt`/`left_base_dt`/…, на
+    случай повторного распознавания), затем время заявки, затем текущая дата. Год
+    заявки, если он отличается, всё равно учитывается декодером через
+    `allowed_years()` (T19) — ошибка здесь не фатальна.
+  - История номеров (`number_history`) — `expected` через существующий `predict_next`,
+    `used` отдельным проходом по ваучерам того же буксира/года (то же правило выбора
+    даты, что в `predict_next`); `pause_days=None` — на момент вызова приложение не
+    знает фактическое время текущего ваучера (это и есть то, что только предстоит
+    распознать).
+  - Пара (T20) определяется по заявке: «другой ваучер той же заявки, буксир которого
+    отличается от текущего (или ещё не выставлен)». Подтверждённый партнёр (статус
+    `confirmed` + все 4 строки заполнены) → `ConfirmedPartner`; иначе, если у партнёра
+    есть файл, → `PendingPartner` с его собственным контекстом (без пары у партнёра —
+    `include_partner=False`, чтобы не уйти в рекурсию). Без заявки или без партнёра —
+    пары нет, не ошибка.
+  - Автоприём (DECISIONS Q3): ответ человека буквально описывает только выключенное
+    состояние флага («только предзаполнение»). Трактовка включённого состояния
+    (`APP_OCR_AUTO_CONFIRM=true` переводит ваучер в `confirmed`, как ручная кнопка) —
+    решение этой сессии, без явного подтверждения человека, см. вопрос ниже; дефолт
+    (выключено) соответствует ответу дословно.
+  - `Voucher.ocr_confidence` заполняется только при `status == "ok"` (иначе нечему
+    верить); при других статусах (`no_models`/`align_failed`/`error`) — `None`,
+    `ocr_status` всё равно записывается, чтобы в карточке было видно, что пайплайн
+    пытался и почему не вышло.
+  - `apply_auto_accept` вызывается и из `imap_ingest.py` (приём ваучеров по почте), не
+    только из `main.py`: иначе поведение «автоприёма» непоследовательно отличалось бы
+    по каналу загрузки — минимальная правка вне заявленных файлов задачи, как
+    разрешает `_common.md` п. 4.
+  - Разовый скрипт ручной проверки на реальных сканах не сохранён в репозитории (пути
+    `data/historical` вне репозитория и машинно-зависимы, упоминать их в
+    закоммиченном коде нельзя по правилам данных) — только эта запись в журнале.
+- Вопросы к человеку:
+  - Поведение `APP_OCR_AUTO_CONFIRM=true` реализовано как полный аналог ручной кнопки
+    «Подтвердить» (статус → `confirmed`, `confirm_fields` + `link_voucher`). DECISIONS
+    Q3 описывает только выключенное состояние — подтвердите (или скорректируйте), что
+    это именно то поведение, которое нужно для прода, прежде чем когда-либо включать
+    флаг.
+  - `torch`/`transformers` в `requirements.txt` рантайму (`app/`) больше не нужны —
+    TrOCR убран из `ocr_voucher_regions` (см. «Решения без человека»). Удалять их из
+    `requirements.txt` самостоятельно не стал (правило `_common.md`, п. 4: подтверждает
+    человек). Если подтвердите, заодно уйдёт самый тяжёлый пакет рантайма (~ГБ с CUDA).
+- Для следующих задач:
+  - Контракт `ocr_voucher_regions(db, voucher, application=None) -> VoucherOcrResult`
+    (`.fields: dict[str, OcrFieldValue]`, `.recognition: VoucherRecognition | None`).
+    `OcrFieldValue(text, confidence, topk=())` — `topk` уже в формате для
+    `predict_fields`/`VoucherFieldPrediction.topk` (строки — `DATETIME_FORMAT =
+    "%Y-%m-%d %H:%M"`, номер — строка цифр).
+  - `VoucherFieldPrediction.topk` — `TEXT`, `json.loads(...)` даёт `[[значение, p], …]`
+    по убыванию `p`; `None`, если кандидат один (печатные поля, приоры, детерминанты).
+    Пригодится T27 для кнопок быстрого выбора в карточке.
+  - `Voucher.ocr_status`/`ocr_confidence` — для бейджа «высокая уверенность» в карточке
+    (T27): `ocr_status == "ok" and ocr_confidence >= settings.ocr_auto_accept_threshold`
+    (та же формула, что `voucher_fields.voucher_auto_accept`, можно переиспользовать).
+  - `flags` из `VoucherRecognition` (T25: `hour24`, `minute_not_mult10`, `number_used`,
+    `pair_differs`, `partner_unavailable`, …) сейчас нигде не сохраняются и не
+    показываются — T27, если понадобится, должен звать `recognize_voucher` явно
+    (ресурсы кэшированы, см. `app.ocr.pipeline.get_resources`) или `voucher_ocr`
+    должен начать их прокидывать в `VoucherOcrResult`.
+  - `_build_partner`/`build_recognition_context` в `voucher_ocr.py` — рабочий пример
+    сборки `RecognitionContext` из БД; если пара должна определяться не только «по
+    заявке» (например, по `Operation`/`joint_with`), расширять там же.
+  - На локальной машине (`host: local`) уже есть обученные `v1`-модели и реальные
+    сканы `data/historical` — удобно гонять ручные проверки интеграции без синтетики
+    (см. «Цифры» выше), но в автоматические тесты это заводить нельзя (машинно-зависимые
+    абсолютные пути вне репозитория).

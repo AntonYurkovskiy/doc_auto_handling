@@ -8,7 +8,10 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Tug, Voucher, VoucherFieldPrediction, VoucherRegion
+from app.config import settings
+from app.models import DocStatus, Tug, Voucher, VoucherFieldPrediction, VoucherRegion
+from app.ocr.pipeline import STATUS_OK
+from app.services.voucher_linking import link_voucher
 
 
 @dataclass(frozen=True)
@@ -107,3 +110,35 @@ def apply_predictions_to_voucher(db: Session, voucher: Voucher) -> None:
                 pass
         else:
             setattr(voucher, field.attr, value or None)
+
+
+def voucher_auto_accept(voucher: Voucher) -> bool:
+    """Уверенность последнего распознавания (T25/T26) не ниже порога автоприёма."""
+    return (
+        voucher.ocr_status == STATUS_OK
+        and voucher.ocr_confidence is not None
+        and voucher.ocr_confidence >= settings.ocr_auto_accept_threshold
+    )
+
+
+def apply_auto_accept(db: Session, voucher: Voucher) -> None:
+    """Автоприём высокой уверенности (T26, DECISIONS Q3) после `predict_and_store`.
+
+    При `voucher_auto_accept(voucher)` предсказания всегда переносятся в поля
+    ваучера (`apply_predictions_to_voucher`) — это и есть «предзаполнение» и
+    пометка «высокая уверенность» (`Voucher.ocr_status`/`ocr_confidence`).
+    Статус ваучера по умолчанию не меняется — его подтверждает оператор.
+    Флаг `settings.ocr_auto_confirm` (выключен по умолчанию) дополнительно
+    подтверждает ваучер автоматически, как ручная кнопка «Подтвердить» —
+    поведение включённого флага не подтверждено человеком (DECISIONS Q3
+    описывает только выключенное состояние), см. вопрос в PROGRESS.md (T26).
+    """
+    if not voucher_auto_accept(voucher):
+        return
+    apply_predictions_to_voucher(db, voucher)
+    if not settings.ocr_auto_confirm:
+        return
+    confirm_fields(db, voucher, datetime.utcnow())
+    link_voucher(db, voucher, voucher.application)
+    voucher.status = DocStatus.confirmed
+    voucher.reviewed_at = datetime.utcnow()

@@ -384,3 +384,14 @@
   (по умолчанию `"v1"`), в `app/config.py` — `Settings.ocr_model_version = "v1"` (точка
   расширения для T25/T26, сама интеграция рантайма в приложение ещё не сделана).
   `ocr_lab/manifest.py` умеет поправки `field=voucher_number` (раньше — только даты).
+- **2026-10-13 (T26, локальный ПК):** на этой машине `data/ocr/models/` и
+  `data/ocr/layouts/` уже содержат реальные `v1`-модели и эталоны трёх вариантов бланка
+  (`kommunar_v1`, `pioneer_v1`, `pioneer_v2`) — значит сессии с `host: local` могут
+  гонять `app.ocr.pipeline.recognize_voucher` на настоящих данных без дополнительной
+  настройки (`.venv` уже содержит `onnxruntime`/`opencv-python-headless`, расхождение
+  из T00 устранено). Ручная проверка T26 на 3 реальных сканах `test`
+  (`data/historical/vauchers/2026/{218,219,220}k.pdf`) дала `ocr_status="ok"` и
+  `confidence` 0,9988–0,9999 на всех трёх — подробности в PROGRESS.md (T26). `mypy app`
+  база не изменилась: те же 2 ошибки из раздела 5 плюс 2 новые в `app/ocr/runtime.py:216,218`
+  (несовпадение `float32`/`float64`, подтверждено сравнением через `git stash` — тоже
+  преэкзистентные, просто не попали в список T00).

@@ -53,9 +53,10 @@ class Settings(BaseSettings):
     # Если пусто — ищем tesseract в PATH.
     tesseract_cmd: str = ""
 
-    # TrOCR для рукописных полей ваучера (даты/времена).
-    # Модель HuggingFace; при первом запуске веса скачиваются в кэш HF (~1.4 ГБ).
-    trocr_enabled: bool = True
+    # TrOCR для рукописных полей ваучера (даты/времена) — T26: убран из рабочего пути
+    # (его заменил пайплайн T25), выключен по умолчанию. Модуль `voucher_trocr.py`
+    # оставлен для ручного сравнения качества, в предсказания не встроен.
+    trocr_enabled: bool = False
     trocr_model: str = "kazars24/trocr-base-handwritten-ru"
     # Устройство: "" — авто (cuda, если доступна); можно "cpu"/"cuda"/"mps".
     trocr_device: str = ""
@@ -86,6 +87,14 @@ class Settings(BaseSettings):
     ocr_auto_accept_threshold: float = 0.9995
     # Включает вызов нового пайплайна (T25) вместо текущего Tesseract/TrOCR (T26).
     ocr_enabled: bool = True
+    # T26, DECISIONS Q3: при auto_accept (confidence >= ocr_auto_accept_threshold)
+    # значения всегда предзаполняются в поля ваучера и выставляются
+    # `Voucher.ocr_status`/`ocr_confidence` («высокая уверенность»). По умолчанию
+    # (False) статус ваучера при этом не меняется — подтверждает оператор. Включённый
+    # флаг дополнительно подтверждает ваучер автоматически (как ручная «Подтвердить»).
+    # DECISIONS Q3 описывает только выключенное состояние — поведение включённого
+    # флага не подтверждено человеком, см. вопрос в PROGRESS.md (T26).
+    ocr_auto_confirm: bool = False
 
 
 settings = Settings()

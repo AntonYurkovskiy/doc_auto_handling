@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import imaplib
+import logging
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +31,7 @@ from app.models import (
     Voucher,
     Work,
 )
+from app.ocr.pipeline import get_resources
 from app.services import export as export_service
 from app.services.application_parser import parse_application
 from app.services.calculation import calculate, tug_count_from_joint
@@ -45,6 +47,7 @@ from app.services.vessels import ensure_vessel
 from app.services.voucher import predict_and_store
 from app.services.voucher_fields import (
     VOUCHER_FIELDS,
+    apply_auto_accept,
     apply_predictions_to_voucher,
     confirm_fields,
     predictions_by_field,
@@ -58,6 +61,8 @@ from app.services.voucher_files import (
 from app.services.voucher_linking import link_voucher
 from app.services.voucher_number import apply_filename_fields
 from app.services.voucher_template import ensure_default_template
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
@@ -78,6 +83,26 @@ def _startup() -> None:
     settings.incoming_vouchers_dir.mkdir(parents=True, exist_ok=True)
     init_db()
     _seed_reference()
+    _warm_up_ocr()
+
+
+def _warm_up_ocr() -> None:
+    """Прогреть ресурсы пайплайна распознавания (T25) один раз при старте.
+
+    Без этого первый ваучер после старта приложения ждал бы загрузку эталонов
+    и моделей (~2 с, см. PROGRESS.md T25). Если моделей/эталонов нет в этой
+    среде — не страшно, приложение работает на приорах (см. `voucher_ocr.py`).
+    """
+    if not settings.ocr_enabled:
+        return
+    try:
+        get_resources(
+            models_dir=settings.ocr_models_dir,
+            layouts_dir=settings.ocr_layouts_dir,
+            model_version=settings.ocr_model_version,
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Пайплайн распознавания ваучеров недоступен: %s", exc)
 
 
 def _seed_reference() -> None:
@@ -393,6 +418,7 @@ async def voucher_upload(file: UploadFile = File(...), db: Session = Depends(get
     db.flush()
     apply_filename_fields(db, voucher)
     predict_and_store(db, voucher)
+    apply_auto_accept(db, voucher)
     return RedirectResponse(f"/vouchers/{voucher.id}", status_code=303)
 
 

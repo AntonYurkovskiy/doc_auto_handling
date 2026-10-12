@@ -348,6 +348,11 @@ class Voucher(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
+    # T26: итог последнего запуска пайплайна распознавания (app.ocr.pipeline) —
+    # "ok" / "no_models" / "align_failed" / "error"; confidence — только при "ok".
+    ocr_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ocr_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     tug: Mapped[Tug | None] = relationship()
     template: Mapped[VoucherTemplate | None] = relationship(back_populates="vouchers")
     application: Mapped[Application | None] = relationship(back_populates="vouchers")
@@ -375,6 +380,9 @@ class VoucherFieldPrediction(Base):
     confirmed_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     source: Mapped[str] = mapped_column(String(30), default="prediction")
+    # T26: top-k кандидатов поля — JSON `[[значение, вероятность], ...]` по убыванию
+    # вероятности (даты/номер — из декодера T19/T20; печатные поля — не заполняется).
+    topk: Mapped[str | None] = mapped_column(Text, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

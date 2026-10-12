@@ -12,11 +12,15 @@ OCR, OCR важнее приоров.
 
 source предсказаний — "filename" / "application" / "ocr" / "prior",
 confidence — уверенность OCR либо 1 / (число кандидатов); для
-детерминированных источников confidence = 1.0.
+детерминированных источников confidence = 1.0. Для дат/номера ваучера (T26)
+OCR-значения приходят из пайплайна T25 (`app.ocr.pipeline`) вместе с топ-k
+кандидатов (`VoucherFieldPrediction.topk`), для печатных полей — из Tesseract,
+как и раньше.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -27,14 +31,16 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     Application,
-    Direction,
     Voucher,
     VoucherFieldPrediction,
     VoucherRegion,
 )
+from app.ocr.pipeline import VoucherRecognition
 from app.services.calculation import match_contract_services, normalize_work_type
 from app.services.voucher_number import voucher_filename_fields
-from app.services.voucher_ocr import ocr_voucher_regions
+from app.services.voucher_ocr import OcrFieldValue, ocr_voucher_regions
+from app.services.voucher_ocr import application_reference_datetime as _application_datetime
+from app.services.voucher_ocr import work_type_from_application as _work_type_from_application
 
 PRINTED_FIELDS: tuple[str, ...] = ("tugboat", "vessel", "agent", "work_type")
 DATETIME_FIELDS: tuple[str, ...] = (
@@ -105,7 +111,12 @@ class VoucherHistory:
 
 @dataclass(frozen=True)
 class FieldPrediction:
-    """Предсказание одного поля до сохранения в БД."""
+    """Предсказание одного поля до сохранения в БД.
+
+    `topk` — top-k кандидатов поля по убыванию вероятности (T26): заполняется
+    только для источника `ocr`, когда пайплайн T25 даёт больше одного варианта
+    (строки дат и номер ваучера); для печатных полей и приоров — пуст.
+    """
 
     field_name: str
     predicted_value: str | None
@@ -113,6 +124,7 @@ class FieldPrediction:
     confidence: float | None
     candidates: tuple[str, ...] = field(default=())
     source: str = PREDICTION_SOURCE_PRIOR
+    topk: tuple[tuple[str, float], ...] = field(default=())
 
 
 def load_history(db: Session, limit: int = 500) -> VoucherHistory:
@@ -285,7 +297,7 @@ def predict_fields(
     voucher: Voucher,
     application: Application | None,
     history: VoucherHistory,
-    ocr_values: Mapping[str, tuple[str | None, float | None]] | None = None,
+    ocr_values: Mapping[str, OcrFieldValue] | None = None,
 ) -> list[FieldPrediction]:
     """Построить предсказания всех полей бланка: имя файла/заявка + OCR + приоры."""
     ocr_values = ocr_values or {}
@@ -311,18 +323,22 @@ def predict_fields(
             )
             continue
 
-        ocr_raw, ocr_conf = ocr_values.get(field_name, (None, None))
-        if ocr_raw:
-            ocr_value = _ocr_predicted_value(field_name, ocr_raw)
-            combined = _unique_list([ocr_value, *candidates])
+        ocr_value = ocr_values.get(field_name)
+        if ocr_value is not None and ocr_value.text:
+            predicted_text = _ocr_predicted_value(field_name, ocr_value.text)
+            topk_texts = [text for text, _ in ocr_value.topk]
+            combined = _unique_list([predicted_text, *topk_texts, *candidates])
             predictions.append(
                 FieldPrediction(
                     field_name=field_name,
-                    predicted_value=ocr_value,
-                    predicted_normalized_value=normalize_prediction(field_name, ocr_value),
-                    confidence=round(ocr_conf, 6) if ocr_conf is not None else None,
+                    predicted_value=predicted_text,
+                    predicted_normalized_value=normalize_prediction(field_name, predicted_text),
+                    confidence=(
+                        round(ocr_value.confidence, 6) if ocr_value.confidence is not None else None
+                    ),
                     candidates=tuple(combined),
                     source=PREDICTION_SOURCE_OCR,
+                    topk=ocr_value.topk,
                 )
             )
             continue
@@ -364,6 +380,7 @@ def store_predictions(
         row.predicted_normalized_value = prediction.predicted_normalized_value
         row.confidence = prediction.confidence
         row.source = prediction.source
+        row.topk = json.dumps(prediction.topk, ensure_ascii=False) if prediction.topk else None
         stored.append(row)
 
     voucher.predicted_at = datetime.utcnow()
@@ -371,18 +388,36 @@ def store_predictions(
     return stored
 
 
+def _apply_recognition_status(voucher: Voucher, recognition: VoucherRecognition | None) -> None:
+    """Статус и уверенность последнего прогона пайплайна T25 на уровне ваучера (T26).
+
+    `ocr_confidence` заполняется только при `status == "ok"` — иначе вводить
+    в заблуждение нечем (пайплайн не вернул запись). Если `ocr_values` передан
+    вызывающим явно (пайплайн не вызывался), `recognition is None` и колонки не
+    трогаются — сохраняются прежние значения.
+    """
+    if recognition is None:
+        return
+    voucher.ocr_status = recognition.status
+    voucher.ocr_confidence = recognition.confidence if recognition.ok else None
+
+
 def predict_and_store(
     db: Session,
     voucher: Voucher,
     application: Application | None = None,
     history: VoucherHistory | None = None,
-    ocr_values: Mapping[str, tuple[str | None, float | None]] | None = None,
+    ocr_values: Mapping[str, OcrFieldValue] | None = None,
 ) -> list[VoucherFieldPrediction]:
-    """Посчитать предсказания (OCR + приоры) и сохранить их через переданную сессию."""
+    """Посчитать предсказания (пайплайн T25 + Tesseract + приоры) и сохранить их."""
     application = application or voucher.application
     history = history if history is not None else load_history(db)
+    recognition: VoucherRecognition | None = None
     if ocr_values is None:
-        ocr_values = ocr_voucher_regions(voucher)
+        ocr_result = ocr_voucher_regions(db, voucher, application)
+        ocr_values = ocr_result.fields
+        recognition = ocr_result.recognition
+    _apply_recognition_status(voucher, recognition)
     return store_predictions(
         db, voucher, predict_fields(voucher, application, history, ocr_values)
     )
@@ -427,22 +462,6 @@ def _known_value(
     if field_name in ("joint_with_line_1", "joint_with_line_2"):
         return voucher.joint_with if field_name == "joint_with_line_1" else None
     return None
-
-
-def _work_type_from_application(application: Application | None) -> str | None:
-    if application is None:
-        return None
-    if application.direction == Direction.entry:
-        return "швартовка"
-    if application.direction == Direction.exit:
-        return "отшвартовка"
-    return None
-
-
-def _application_datetime(application: Application | None) -> datetime | None:
-    if application is None:
-        return None
-    return application.entry_datetime or application.exit_datetime or application.received_at
 
 
 def _regions_by_name(voucher: Voucher) -> dict[str, VoucherRegion]:
