@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,8 @@ from ocr_lab.manifest import (
     extract_voucher_number,
     load_corrections,
     make_scan_id,
+    monthly_boundaries,
+    monthly_split,
     parse_dt,
 )
 
@@ -600,3 +603,28 @@ def test_load_corrections_status_is_case_insensitive(tmp_path: Path, status: str
             }
         )
     assert ("2025_1k", "arrived_base") in load_corrections(path)
+
+
+# --- T28: границы ежемесячного цикла --------------------------------------------------------
+
+
+def test_monthly_boundaries_holdout_is_last_full_month():
+    val_start, test_start, next_month_start = monthly_boundaries(date(2026, 7, 1))
+    assert val_start == date(2026, 5, 1)
+    assert test_start == date(2026, 6, 1)
+    assert next_month_start == date(2026, 7, 1)
+
+
+def test_monthly_boundaries_handles_year_rollover():
+    val_start, test_start, next_month_start = monthly_boundaries(date(2026, 1, 15))
+    assert val_start == date(2025, 11, 1)
+    assert test_start == date(2025, 12, 1)
+    assert next_month_start == date(2026, 1, 1)
+
+
+def test_monthly_split_buckets_train_val_test_excluded():
+    dates = pd.Series(
+        [date(2026, 4, 30), date(2026, 5, 15), date(2026, 6, 10), date(2026, 7, 1), None]
+    )
+    result = monthly_split(dates, as_of=date(2026, 7, 1))
+    assert list(result) == ["train", "val", "test", "excluded", "excluded"]

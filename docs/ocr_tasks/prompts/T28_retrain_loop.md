@@ -16,7 +16,7 @@ claude_effort: high
 devin_model: claude-sonnet-5-medium
 review: devin:gpt-5-6-sol-high
 human_checkpoint: —
-max_turns: 120
+max_turns: 200
 optional: false
 ---
 

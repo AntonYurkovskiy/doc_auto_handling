@@ -37,7 +37,7 @@ import torch.nn.functional as F
 from app.ocr.digit_values import TENS_EMPTY, value_log_probs
 from app.ocr.number_scores import HEADS, encode_heads, number_log_probs
 from ocr_lab import paths
-from ocr_lab.dataset import PART_ID, TARGET_SIZE, build_samples
+from ocr_lab.dataset import INDEX_CSV, PART_ID, TARGET_SIZE, build_samples
 from ocr_lab.number_models import ctc_targets
 from ocr_lab.train_digits import (
     V0_DIR as DIGITS_V0_DIR,
@@ -224,22 +224,28 @@ def digit_metrics(
     return out
 
 
-def _digit_logits_for(split: str, model: Any, size: tuple[int, int]
+def _digit_logits_for(split: str, model: Any, size: tuple[int, int], *,
+                      manifest: Path = paths.MANIFEST, index_csv: Path = INDEX_CSV
                       ) -> tuple[np.ndarray, np.ndarray, list[str], np.ndarray]:
     """Логиты `digits_v0` на кропах сплита, как при отборе модели T16 (`build_samples`)."""
-    samples = build_samples(split=split)
+    samples = build_samples(split=split, manifest=manifest, index_csv=index_csv)
     images, part_ids = eval_tensors(samples, size)
     tens, units = infer_logits(model, images, part_ids, torch.device("cpu"))
     parts = [s.subfield.split(".")[1] for s in samples]
     return tens, units, parts, np.array([s.value for s in samples])
 
 
-def calibrate_digits(model_dir: Path = DIGITS_V0_DIR, *, test: bool = True) -> dict[str, Any]:
+def calibrate_digits(model_dir: Path = DIGITS_V0_DIR, *, test: bool = True,
+                     manifest: Path = paths.MANIFEST,
+                     index_csv: Path = INDEX_CSV) -> dict[str, Any]:
     """Подобрать температуры на `val`, замерить до/после на `val` (и, справочно, на `test`)."""
     model, cfg, _ = load_digits(model_dir)
     size = tuple(cfg.target_size) or TARGET_SIZE
     splits = ("val", "test") if test else ("val",)
-    data = {s: _digit_logits_for(s, model, size) for s in splits}  # type: ignore[arg-type]
+    data = {
+        s: _digit_logits_for(s, model, size, manifest=manifest, index_csv=index_csv)
+        for s in splits
+    }  # type: ignore[arg-type]
     tens_v, units_v, parts_v, values_v = data["val"]
     notes: dict[str, str] = {}
     temps = fit_digit_temperatures(tens_v, units_v, values_v, notes)
@@ -317,14 +323,16 @@ def number_metrics(outputs: np.ndarray, values: Sequence[int], kind: str,
     return _metrics(np.array(conf), np.array(correct), nll)
 
 
-def calibrate_number(model_dir: Path = NUMBER_V0_DIR, *, test: bool = True) -> dict[str, Any]:
+def calibrate_number(model_dir: Path = NUMBER_V0_DIR, *, test: bool = True,
+                     manifest: Path = paths.MANIFEST,
+                     index_csv: Path = INDEX_CSV) -> dict[str, Any]:
     """Подобрать температуру номера на `val`, замерить до/после на `val` и справочно на `test`."""
     model, cfg, _ = load_number(model_dir)
     kind = cfg.model.kind
     device = torch.device("cpu")
     data = {}
     for split in ("val", "test") if test else ("val",):
-        crops = number_crops(split, with_truth=True)
+        crops = number_crops(split, manifest=manifest, index_csv=index_csv, with_truth=True)
         outputs = infer_outputs(model, crop_tensors(crops, cfg.target_size), device)
         data[split] = (outputs, [int(c.value) for c in crops if c.value is not None])
     outputs_v, values_v = data["val"]
@@ -401,12 +409,19 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
 
 
 def run(kind: str, model_dir: Path | None = None, *, test: bool = True,
-        reports_dir: Path | None = None) -> dict[str, Any]:
-    """Откалибровать модель, записать `calibration.json` и PNG; вернуть результат."""
+        reports_dir: Path | None = None, manifest: Path = paths.MANIFEST,
+        index_csv: Path = INDEX_CSV) -> dict[str, Any]:
+    """Откалибровать модель, записать `calibration.json` и PNG; вернуть результат.
+
+    `manifest`/`index_csv` — T28: калибровка ежемесячного цикла идёт по `val` объединённого
+    манифеста (история + подтверждённые ваучеры), а не по каноническому.
+    """
     if kind == "digits":
-        result = calibrate_digits(model_dir or DIGITS_V0_DIR, test=test)
+        result = calibrate_digits(model_dir or DIGITS_V0_DIR, test=test, manifest=manifest,
+                                  index_csv=index_csv)
     elif kind == "number":
-        result = calibrate_number(model_dir or NUMBER_V0_DIR, test=test)
+        result = calibrate_number(model_dir or NUMBER_V0_DIR, test=test, manifest=manifest,
+                                  index_csv=index_csv)
     else:
         raise ValueError(f"неизвестная модель: {kind}")
     target = model_dir or (DIGITS_V0_DIR if kind == "digits" else NUMBER_V0_DIR)
@@ -428,8 +443,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model-dir", type=Path, default=None)
     parser.add_argument("--no-test", action="store_true",
                         help="не считать справочные метрики на test")
+    parser.add_argument("--manifest", type=Path, default=paths.MANIFEST,
+                        help="T28: манифест ежемесячного цикла вместо канонического")
+    parser.add_argument("--index-csv", type=Path, default=INDEX_CSV)
     args = parser.parse_args(argv)
-    run(args.kind, args.model_dir, test=not args.no_test)
+    run(args.kind, args.model_dir, test=not args.no_test, manifest=args.manifest,
+        index_csv=args.index_csv)
     return 0
 
 

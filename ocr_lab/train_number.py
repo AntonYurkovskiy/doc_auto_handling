@@ -416,8 +416,14 @@ def write_history(path: Path, history: Sequence[dict[str, Any]]) -> None:
 
 
 def train(cfg: TrainConfig, *, runs_dir: Path = RUNS_DIR, max_minutes: float | None = None,
-          resume: bool = False, digits_checkpoint: Path = DIGITS_V0) -> int:
-    """Обучить (или продолжить) запуск. Код возврата: 0 — готово, 3 — прервано по времени."""
+          resume: bool = False, digits_checkpoint: Path = DIGITS_V0,
+          manifest: Path = paths.MANIFEST, index_csv: Path = INDEX_CSV) -> int:
+    """Обучить (или продолжить) запуск. Код возврата: 0 — готово, 3 — прервано по времени.
+
+    `manifest`/`index_csv` — T28: ежемесячное дообучение гонит train/val по своему
+    (объединённому история+подтверждённые ваучеры) манифесту, а не по каноническому
+    `data/ocr/manifest.csv`. По умолчанию — прежнее поведение (T17).
+    """
     t_start = time.time()
     run_dir = paths.ensure_dir(runs_dir / cfg.run)
     log = Logger(run_dir / "train.log")
@@ -438,8 +444,8 @@ def train(cfg: TrainConfig, *, runs_dir: Path = RUNS_DIR, max_minutes: float | N
         raise SystemExit(f"{run_dir.name}: запуск уже есть — используйте --resume")
 
     set_seed(cfg.seed)
-    train_crops = number_crops("train")
-    val_crops = number_crops("val")
+    train_crops = number_crops("train", manifest=manifest, index_csv=index_csv)
+    val_crops = number_crops("val", manifest=manifest, index_csv=index_csv)
     log(f"запуск {cfg.run} ({cfg.model.kind}): train {len(train_crops)}, "
         f"val {len(val_crops)}, устройство {device}, потоков {torch.get_num_threads()}")
     train_images = [read_gray(c.path) for c in train_crops]
@@ -493,8 +499,8 @@ def train(cfg: TrainConfig, *, runs_dir: Path = RUNS_DIR, max_minutes: float | N
     else:
         meta = cfg.to_dict() | {
             "git_commit": _git_commit(),
-            "manifest_sha256": _file_sha256(paths.MANIFEST),
-            "crops_index_sha256": _file_sha256(INDEX_CSV),
+            "manifest_sha256": _file_sha256(manifest),
+            "crops_index_sha256": _file_sha256(index_csv),
             "digits_checkpoint_sha256": _file_sha256(digits_checkpoint)
             if cfg.init_digits else "",
             "n_train": len(train_crops),
@@ -696,6 +702,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_train.add_argument("--max-minutes", type=float, default=None)
     p_train.add_argument("--resume", action="store_true")
     p_train.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
+    p_train.add_argument("--manifest", type=Path, default=paths.MANIFEST,
+                         help="T28: манифест ежемесячного цикла вместо канонического")
+    p_train.add_argument("--index-csv", type=Path, default=INDEX_CSV)
 
     p_pred = sub.add_parser("predict", help="предсказания в формате T13 и сырые выходы")
     p_pred.add_argument("--run-dir", type=Path, default=V0_DIR)
@@ -725,7 +734,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_workers=args.workers,
         )
         return train(cfg, runs_dir=args.runs_dir, max_minutes=args.max_minutes,
-                     resume=args.resume, digits_checkpoint=args.digits_checkpoint)
+                     resume=args.resume, digits_checkpoint=args.digits_checkpoint,
+                     manifest=args.manifest, index_csv=args.index_csv)
     if args.cmd == "predict":
         predict(args.run_dir, args.split, source=args.source)
     elif args.cmd == "compare":

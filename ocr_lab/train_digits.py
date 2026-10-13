@@ -356,8 +356,14 @@ def load_model(run_dir: Path, device: torch.device | None = None,
 
 
 def train(cfg: TrainConfig, *, runs_dir: Path = RUNS_DIR, max_minutes: float | None = None,
-          resume: bool = False) -> int:
-    """Обучить (или продолжить) запуск. Код возврата: 0 — готово, 3 — прервано по времени."""
+          resume: bool = False, manifest: Path = paths.MANIFEST,
+          index_csv: Path = INDEX_CSV) -> int:
+    """Обучить (или продолжить) запуск. Код возврата: 0 — готово, 3 — прервано по времени.
+
+    `manifest`/`index_csv` — T28: ежемесячное дообучение гонит train/val по своему
+    (объединённому история+подтверждённые ваучеры) манифесту, а не по каноническому
+    `data/ocr/manifest.csv`. По умолчанию — прежнее поведение (T16).
+    """
     t_start = time.time()
     run_dir = paths.ensure_dir(runs_dir / cfg.run)
     log = Logger(run_dir / "train.log")
@@ -380,8 +386,8 @@ def train(cfg: TrainConfig, *, runs_dir: Path = RUNS_DIR, max_minutes: float | N
         raise SystemExit(f"{run_dir.name}: запуск уже есть — используйте --resume")
 
     set_seed(cfg.seed)
-    train_samples = build_samples(split="train")
-    val_samples = build_samples(split="val")
+    train_samples = build_samples(split="train", manifest=manifest, index_csv=index_csv)
+    val_samples = build_samples(split="val", manifest=manifest, index_csv=index_csv)
     log(f"запуск {cfg.run}: train {len(train_samples)}, val {len(val_samples)}, "
         f"устройство {device}")
     t0 = time.time()
@@ -437,8 +443,8 @@ def train(cfg: TrainConfig, *, runs_dir: Path = RUNS_DIR, max_minutes: float | N
     else:
         meta = cfg.to_dict() | {
             "git_commit": _git_commit(),
-            "manifest_sha256": _file_sha256(paths.MANIFEST),
-            "crops_index_sha256": _file_sha256(INDEX_CSV),
+            "manifest_sha256": _file_sha256(manifest),
+            "crops_index_sha256": _file_sha256(index_csv),
             "n_train": len(train_samples),
             "n_val": len(val_samples),
             "device": torch.cuda.get_device_name(0) if device.type == "cuda" else "cpu",
@@ -667,6 +673,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_train.add_argument("--max-minutes", type=float, default=None)
     p_train.add_argument("--resume", action="store_true")
     p_train.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
+    p_train.add_argument("--manifest", type=Path, default=paths.MANIFEST,
+                         help="T28: манифест ежемесячного цикла вместо канонического")
+    p_train.add_argument("--index-csv", type=Path, default=INDEX_CSV)
 
     p_pred = sub.add_parser("predict", help="предсказания в формате T13")
     p_pred.add_argument("--run-dir", type=Path, default=V0_DIR)
@@ -695,7 +704,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             augment=not args.no_augment, mnist=args.mnist, num_workers=args.workers,
         )
         return train(cfg, runs_dir=args.runs_dir, max_minutes=args.max_minutes,
-                     resume=args.resume)
+                     resume=args.resume, manifest=args.manifest, index_csv=args.index_csv)
     if args.cmd == "predict":
         predict(args.run_dir, args.split, source=args.source, out=args.out)
     elif args.cmd == "errors":

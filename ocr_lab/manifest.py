@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -671,6 +672,187 @@ def _column_order() -> list[str]:
     return cols
 
 
+# --- T28: ежемесячный цикл дообучения — объединение истории и подтверждённых ваучеров --------
+
+#: Колонки объединённого манифеста (T28) сверх `_column_order()`: откуда взята строка
+#: (`"history"` | `"app"`, см. `ocr_lab.export_confirmed`) и sha256 файла скана (дедуп).
+COMBINE_EXTRA_COLUMNS: tuple[str, ...] = ("source", "sha256")
+
+
+def _month_start(d: date, *, offset: int = 0) -> date:
+    """Первое число месяца `d`, смещённое на `offset` месяцев (может быть отрицательным)."""
+    months = d.year * 12 + (d.month - 1) + offset
+    return date(months // 12, months % 12 + 1, 1)
+
+
+def monthly_boundaries(as_of: date) -> tuple[date, date, date]:
+    """`(val_start, test_start, next_month_start)` для ежемесячного цикла дообучения.
+
+    `test_start .. next_month_start-1` — последний **полный** месяц перед `as_of`: holdout
+    (план, «Этап 6»). `val_start .. test_start-1` — месяц перед ним (решение этой задачи —
+    в плане обязателен только holdout; `val` нужен существующей инфраструктуре T16-T18 для
+    ранней остановки и калибровки, см. журнал T28). Всё раньше `val_start` — `train`.
+    """
+    next_month_start = _month_start(as_of)
+    test_start = _month_start(next_month_start, offset=-1)
+    val_start = _month_start(test_start, offset=-1)
+    return val_start, test_start, next_month_start
+
+
+def monthly_split(dates: pd.Series[Any], *, as_of: date) -> pd.Series[Any]:
+    """train/val/test для ежемесячного цикла (см. :func:`monthly_boundaries`).
+
+    `dates` — `datetime.date` (или `None`/`NaN`) на строку, обычно `left_base` строки
+    бланка. Пустая дата, текущий (неполный) месяц `as_of` и будущее — `"excluded"`: такие
+    строки не участвуют ни в обучении, ни в оценке этого цикла.
+    """
+    val_start, test_start, next_month_start = monthly_boundaries(as_of)
+
+    def _one(d: Any) -> str:
+        if d is None or (isinstance(d, float) and pd.isna(d)):
+            return "excluded"
+        day = d.date() if isinstance(d, datetime) else d
+        if day < val_start:
+            return "train"
+        if day < test_start:
+            return "val"
+        if day < next_month_start:
+            return "test"
+        return "excluded"
+
+    return dates.map(_one)
+
+
+def file_sha256(path: Path) -> str | None:
+    """sha256 файла по пути; `None`, если файл не читается (не валит сборку манифеста)."""
+    try:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+@dataclass
+class CombineReport:
+    """Агрегаты объединения истории и `source=app` (T28) — без имён судов/агентов."""
+
+    total_history: int = 0
+    total_app: int = 0
+    duplicate_sha256: list[str] = field(default_factory=list)
+    duplicate_key: list[str] = field(default_factory=list)
+    dedup_conflicts: list[str] = field(default_factory=list)  # sha256 и ключ не согласны
+    pair_count: int = 0
+    pair_full_match_count: int = 0
+    split_counts: Counter[tuple[str, str]] = field(default_factory=Counter)  # (source, split)
+    n_final: int = 0
+
+
+def combine(
+    history: pd.DataFrame, app_df: pd.DataFrame, *, as_of: date
+) -> tuple[pd.DataFrame, CombineReport]:
+    """Объединить замороженную историю (:func:`build`) и выгрузку подтверждённых ваучеров
+    (`ocr_lab.export_confirmed`, колонка `source="app"`) в один манифест ежемесячного цикла.
+
+    Дубль строки `source=app` с историей — по `sha256` файла скана **или** по ключу
+    (буксир, год, номер): история уже прошла ручную проверку истины, поэтому при совпадении
+    строка `app` отбрасывается, а не заменяет историю (план T28, п. 1). Несовпадение двух
+    признаков дедупликации (один сработал, другой нет) помечается как `dedup_conflicts` —
+    не блокирует сборку, но стоит проверить вручную.
+
+    Сплит — :func:`monthly_split` от `left_base`. Затем :func:`_assign_pairs` (как в
+    :func:`build`) выравнивает сплит внутри пары k/p по более раннему участнику — пара может
+    теперь объединять строку истории с новой строкой `app`.
+    """
+    report = CombineReport(total_history=len(history), total_app=len(app_df))
+
+    history = history.copy()
+    history["source"] = "history"
+    if "sha256" not in history.columns:
+        history["sha256"] = [file_sha256(Path(p)) if p else None for p in history["scan_path"]]
+
+    history_sha = {s for s in history["sha256"] if s}
+    history_keys = {
+        (str(t), str(y), str(n))
+        for t, y, n in zip(history["tug_code"], history["year"], history["voucher_number"],
+                           strict=True)
+    }
+
+    columns = [*_column_order(), *COMBINE_EXTRA_COLUMNS]
+    for col in columns:
+        if col not in history.columns:
+            history[col] = ""
+
+    keep_mask: list[bool] = []
+    app_df = app_df.copy()
+    for col in columns:
+        if col not in app_df.columns:
+            app_df[col] = ""
+    for row in app_df.itertuples(index=False):
+        row_d = row._asdict()
+        dup_sha = bool(row_d.get("sha256")) and row_d["sha256"] in history_sha
+        key = (str(row_d["tug_code"]), str(row_d["year"]), str(row_d["voucher_number"]))
+        dup_key = key in history_keys
+        if dup_sha:
+            report.duplicate_sha256.append(str(row_d["scan_id"]))
+        if dup_key:
+            report.duplicate_key.append(str(row_d["scan_id"]))
+        if dup_sha != dup_key:
+            report.dedup_conflicts.append(str(row_d["scan_id"]))
+        keep_mask.append(not (dup_sha or dup_key))
+    app_kept = app_df.loc[keep_mask].copy() if len(app_df) else app_df
+
+    combined = pd.concat([history[columns], app_kept[columns]], ignore_index=True)
+
+    left_dates = combined["left_base_dt"].map(
+        lambda s: datetime.fromisoformat(s).date() if s else None
+    )
+    combined["split"] = monthly_split(left_dates, as_of=as_of).to_numpy()
+
+    records = combined.to_dict("records")
+    for rec, d in zip(records, left_dates, strict=True):
+        rec["_left_base_dt_for_pairing"] = datetime(d.year, d.month, d.day) if d else None
+    pair_count, pair_full_match = _assign_pairs(records)
+    report.pair_count = pair_count
+    report.pair_full_match_count = pair_full_match
+    for rec in records:
+        rec.pop("_left_base_dt_for_pairing", None)
+        report.split_counts[(str(rec["source"]), str(rec["split"]))] += 1
+
+    report.n_final = len(records)
+    out = pd.DataFrame(records, columns=columns)
+    return out, report
+
+
+def render_combine_report(report: CombineReport, *, as_of: date) -> str:
+    """Отчёт объединения (markdown) — только агрегаты и `scan_id`."""
+    val_start, test_start, next_month_start = monthly_boundaries(as_of)
+    lines = [
+        "# Манифест ежемесячного цикла дообучения (T28)",
+        "",
+        f"- `as_of`: {as_of.isoformat()}",
+        f"- holdout (`test`): {test_start.isoformat()} .. "
+        f"{(next_month_start - date.resolution).isoformat()}",
+        f"- `val`: {val_start.isoformat()} .. {(test_start - date.resolution).isoformat()}",
+        f"- строк истории: {report.total_history}",
+        f"- строк `source=app` до дедупа: {report.total_app}",
+        f"- отсечено по sha256: {len(report.duplicate_sha256)}",
+        f"- отсечено по ключу (буксир, год, номер): {len(report.duplicate_key)}",
+        f"- конфликтов дедупа (признаки не совпали): {len(report.dedup_conflicts)}",
+        f"- пар k/p в объединённом манифесте: {report.pair_count} "
+        f"(из них с полным совпадением времён: {report.pair_full_match_count})",
+        f"- итоговых строк: {report.n_final}",
+        "",
+        "## По источнику и сплиту",
+        "",
+    ]
+    for (source, split), n in sorted(report.split_counts.items()):
+        lines.append(f"- {source} / {split}: {n}")
+    return "\n".join(lines) + "\n"
+
+
 # --- Отчёт в markdown ------------------------------------------------------------------------
 
 
@@ -788,6 +970,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Сборка манифеста OCR-датасета ваучеров")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("build", help="собрать data/ocr/manifest.csv и отчёт")
+
+    p_comb = sub.add_parser(
+        "combine", help="T28: история + подтверждённые ваучеры (source=app) -> манифест цикла"
+    )
+    p_comb.add_argument("--history", type=Path, default=MANIFEST)
+    p_comb.add_argument("--app", type=Path, required=True, help="выгрузка ocr_lab.export_confirmed")
+    p_comb.add_argument("--out", type=Path, required=True)
+    p_comb.add_argument("--as-of", type=date.fromisoformat, default=None,
+                        help="ГГГГ-ММ-ДД, по умолчанию — сегодня")
+    p_comb.add_argument("--report", type=Path, default=None)
     args = parser.parse_args(argv)
 
     if args.command == "build":
@@ -798,6 +990,19 @@ def main(argv: list[str] | None = None) -> int:
         report_path = REPORTS_DIR / "manifest_report.md"
         report_path.write_text(render_report(report), encoding="utf-8")
         print(f"manifest: {len(manifest_df)} строк -> {MANIFEST}")
+        print(f"отчёт -> {report_path}")
+        return 0
+    if args.command == "combine":
+        as_of = args.as_of or datetime.now().date()
+        history_df = pd.read_csv(args.history, dtype=str, keep_default_na=False)
+        app_df = pd.read_csv(args.app, dtype=str, keep_default_na=False)
+        combined, comb_report = combine(history_df, app_df, as_of=as_of)
+        ensure_dir(args.out.parent)
+        combined.to_csv(args.out, index=False, encoding="utf-8-sig")
+        report_path = args.report or (REPORTS_DIR / f"manifest_combine_{as_of.isoformat()}.md")
+        ensure_dir(report_path.parent)
+        report_path.write_text(render_combine_report(comb_report, as_of=as_of), encoding="utf-8")
+        print(f"manifest цикла: {len(combined)} строк -> {args.out}")
         print(f"отчёт -> {report_path}")
         return 0
     return 1
