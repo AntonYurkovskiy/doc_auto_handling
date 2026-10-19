@@ -85,9 +85,11 @@ nvidia-smi
 .\.venv\Scripts\python.exe -m pip install onnxruntime onnx
 ```
 
-`requirements-dev.txt` подтягивает и `requirements.txt` (включая `torch==2.5.1` CPU и
-`transformers`; они уже стоят, повторно качаться не будут). `onnxruntime` и `onnx` затем
-закрепите версиями в `requirements.txt` (это сделает T18).
+`requirements-dev.txt` подтягивает и `requirements.txt`. С 2026-10-19 в `requirements.txt` нет
+`torch` и `transformers` (решение В10: приложение их не использует, TrOCR убран из рабочего
+пути). Уже стоящие в `.venv` пакеты не мешают; тесты кода обучения, которым нужен `torch`,
+на чистой установке пропускаются (`importorskip`), а полностью идут в `.venv-train`.
+`onnxruntime` и `onnx` закреплены версиями в `requirements.txt` и `requirements-dev.txt` (T18).
 
 ## 4. `.venv-train`: torch + CUDA и остальное для обучения
 
