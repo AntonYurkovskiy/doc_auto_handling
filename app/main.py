@@ -52,6 +52,7 @@ from app.services.voucher_fields import (
     apply_predictions_to_voucher,
     confirm_fields,
     predictions_by_field,
+    printed_hints,
     quick_fields,
     voucher_needs_review,
     voucher_ocr_badge,
@@ -424,6 +425,7 @@ def voucher_new(request: Request, db: Session = Depends(get_db)):
             "voucher_file_url": None,
             "fields": [],
             "quick_fields": {},
+            "hints": {},
             "ocr_badge": None,
             "applications": db.query(Application).order_by(Application.id.desc()).all(),
         },
@@ -448,6 +450,8 @@ async def voucher_upload(file: UploadFile = File(...), db: Session = Depends(get
     apply_filename_fields(db, voucher)
     predict_and_store(db, voucher)
     apply_auto_accept(db, voucher)
+    # Без коммита предзаполнение автоприёма откатывалось при закрытии сессии (дефект D1, T29).
+    db.commit()
     return RedirectResponse(f"/vouchers/{voucher.id}", status_code=303)
 
 
@@ -487,8 +491,8 @@ def voucher_create(
     _apply_voucher_form(item, form)
     if item.application_id is not None and item.template_id is None:
         item.template = ensure_default_template(db)
-    if item.application is not None:
-        predict_and_store(db, item, item.application)
+    # Распознавание заново не запускаем (решение В6): то, что видел оператор на загрузке,
+    # остаётся в предсказаниях, «Сохранить» только сохраняет форму.
     # Ручное сохранение без подтверждения не завершает проверку ваучера.
     if item.status in (DocStatus.new, DocStatus.needs_review):
         item.status = DocStatus.needs_review
@@ -510,8 +514,8 @@ def voucher_confirm(
     db.flush()
     if item.template_id is None:
         item.template = ensure_default_template(db)
-    if item.application is not None:
-        predict_and_store(db, item, item.application)
+    # Без перераспознавания (решение В6, дефект D3): иначе оно затирало уверенность, которую
+    # видел оператор, и подмешивало партнёра пары.
     confirm_fields(db, item, datetime.utcnow())
     link_voucher(db, item, item.application)
     item.status = DocStatus.confirmed
@@ -619,6 +623,7 @@ def voucher_detail(voucher_id: int, request: Request, db: Session = Depends(get_
             "voucher_file_url": file_url,
             "fields": [(field, predictions.get(field.name)) for field in VOUCHER_FIELDS],
             "quick_fields": {qf.input_name: qf for qf in quick_fields(item)},
+            "hints": printed_hints(item),
             "ocr_badge": voucher_ocr_badge(item),
             "applications": db.query(Application).order_by(Application.id.desc()).all(),
         },

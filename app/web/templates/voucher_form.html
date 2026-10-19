@@ -20,6 +20,11 @@
 </div>
 {% endif %}
 {% endmacro %}
+{% macro hint(name) %}
+{% if hints and hints.get(name) %}
+<div class="field-hint">На бланке прочитано «{{ hints.get(name) }}», среди известных значений не нашлось. Проверьте вручную.</div>
+{% endif %}
+{% endmacro %}
 {% macro conf_class(qf) %}{{ ("conf-" ~ qf.confidence_level) if qf else "" }}{% endmacro %}
 {% block content %}
 <h1>{{ "Ваучер #" ~ item.id if item else "Новый ваучер" }}</h1>
@@ -77,15 +82,21 @@
             </select>
 
             <label>Название судна / объект</label>
-            <input name="vessel_name" value="{{ item.vessel_name or '' if item else '' }}">
+            <div>
+                <input name="vessel_name" value="{{ item.vessel_name or '' if item else '' }}">
+                {{ hint("vessel_name") }}
+            </div>
 
             <label>Агент</label>
-            <select name="agent">
-                <option value="">—</option>
-                {% for ag in agents %}
-                <option value="{{ ag.name }}" {% if item and item.agent == ag.name %}selected{% endif %}>{{ ag.name }}</option>
-                {% endfor %}
-            </select>
+            <div>
+                <select name="agent">
+                    <option value="">—</option>
+                    {% for ag in agents %}
+                    <option value="{{ ag.name }}" {% if item and item.agent == ag.name %}selected{% endif %}>{{ ag.name }}</option>
+                    {% endfor %}
+                </select>
+                {{ hint("agent") }}
+            </div>
 
             <label>Связанная заявка</label>
             <select name="application_id">
@@ -100,8 +111,11 @@
             </select>
 
             <label>Вид работ</label>
-            <input name="work_type" value="{{ item.work_type or '' if item else '' }}"
-                   placeholder="Швартовка / Отшвартовка / Обслуживание морских сооружений ...">
+            <div>
+                <input name="work_type" value="{{ item.work_type or '' if item else '' }}"
+                       placeholder="Швартовка / Отшвартовка / Обслуживание морских сооружений ...">
+                {{ hint("work_type") }}
+            </div>
 
             {% set qf_left_base = quick_fields.get("left_base_dt") %}
             <label>Выход из базы</label>

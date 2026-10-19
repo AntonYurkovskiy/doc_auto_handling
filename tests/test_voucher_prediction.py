@@ -101,7 +101,9 @@ def test_predict_fields_uses_prior_source_and_transparent_confidence():
 
     assert set(predictions) == set(VOUCHER_FIELDS)
     assert all(
-        p.source == "prior" for name, p in predictions.items() if name != "vessel"
+        p.source == "prior"
+        for name, p in predictions.items()
+        if name not in ("vessel", "agent", "work_type")
     )
 
     tugboat = predictions["tugboat"]
@@ -114,6 +116,17 @@ def test_predict_fields_uses_prior_source_and_transparent_confidence():
     assert vessel.predicted_value == "MERIDIAN"
     assert vessel.source == PREDICTION_SOURCE_APPLICATION
     assert vessel.confidence == pytest.approx(1.0)
+
+    # Агент, как и судно, берётся из заявки (приоритет: ввод человека, заявка, чтение).
+    agent = predictions["agent"]
+    assert agent.predicted_value == "Транс-Агро"
+    assert agent.source == PREDICTION_SOURCE_APPLICATION
+    assert agent.confidence == pytest.approx(1.0)
+
+    # Вид работ без прочитанного значения — по направлению заявки (вход = швартовка).
+    work_type = predictions["work_type"]
+    assert work_type.predicted_value == "швартовка"
+    assert work_type.source == PREDICTION_SOURCE_APPLICATION
 
     assert predictions["remarks"].predicted_value is None
     assert predictions["remarks"].confidence is None

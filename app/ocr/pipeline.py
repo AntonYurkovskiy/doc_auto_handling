@@ -207,9 +207,13 @@ class VoucherRecognition:
       вероятностью (`app.ocr.decoder.DecodeResult.marginals`);
     - `voucher_number` — top-3 номеров `(номер, вероятность)`;
     - `records` — top-N записей ваучера целиком (`app.ocr.decoder.Record`, со `score`/`p`);
-    - `confidence`/`margin` — итоговой записи (после пары, если она была);
-    - `auto_accept` — `confidence` не ниже порога; только предзаполнение, не подтверждение
-      (DECISIONS Q3) — решение о статусе ваучера принимает приложение;
+    - `confidence`/`margin` — записи **ядра** (чтение одного ваучера, без пары): по ним
+      плашка, автоприём и мониторинг (DECISIONS T21: пара поднимает уверенность и у ошибок,
+      совпавших с партнёром, поэтому для автоприёма не годится). `fields`/`records` —
+      после пары, если она была: лучшие подсказки оператору;
+    - `pair_confidence` — уверенность записи после пары (`None`, если пары не было);
+    - `auto_accept` — `confidence` ядра не ниже порога; только предзаполнение, не
+      подтверждение (DECISIONS Q3) — решение о статусе ваучера принимает приложение;
     - `crop_paths` — пути сохранённых кропов подполей (для показа в UI, T27);
     - `timing` — время по этапам, секунды;
     - `flags` — коды из `app.ocr.decoder`/`number_decoder`/`pair_decoder`
@@ -230,6 +234,10 @@ class VoucherRecognition:
     crop_paths: Mapping[str, Path]
     timing: Mapping[str, float]
     flags: tuple[str, ...]
+    pair_confidence: float | None = None
+    #: Выровненная по эталону страница (1654×2340, серая) — только при `keep_aligned=True`;
+    #: из неё приложение вырезает печатные строки (`app.ocr.printed`).
+    aligned_page: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     @property
     def ok(self) -> bool:
@@ -263,6 +271,11 @@ def _empty_result(
         timing=dict(timing),
         flags=(),
     )
+
+
+def unavailable_result(reason: str) -> VoucherRecognition:
+    """Результат «пайплайн недоступен» (`no_models`) для приложения, когда ресурсов нет."""
+    return _empty_result(STATUS_NO_MODELS, reason, {})
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +363,11 @@ def _build_resources(models_dir: Path, layouts_dir: Path, model_version: str) ->
 
 _RESOURCES: dict[tuple[str, str, str], PipelineResources] = {}
 _RESOURCES_LOCK = threading.Lock()
+#: Ключ -> (когда не удалось, класс ошибки, текст). Без этого на машине без моделей каждый
+#: ваучер заново пытался загрузить эталоны (+1,4 с, дефект D4 приёмки T29).
+_UNAVAILABLE: dict[tuple[str, str, str], tuple[float, type[Exception], str]] = {}
+#: Сколько секунд помнить, что ресурсов нет, прежде чем попробовать загрузить заново.
+UNAVAILABLE_TTL_S = 60.0
 
 
 def get_resources(
@@ -376,7 +394,15 @@ def get_resources(
     with _RESOURCES_LOCK:
         resources = _RESOURCES.get(key)
         if resources is None:
-            resources = _build_resources(resolved_models, resolved_layouts, version)
+            failed = _UNAVAILABLE.get(key)
+            if failed is not None and time.monotonic() - failed[0] < UNAVAILABLE_TTL_S:
+                raise failed[1](failed[2])
+            try:
+                resources = _build_resources(resolved_models, resolved_layouts, version)
+            except (FileNotFoundError, LayoutError, rt.OcrRuntimeError) as exc:
+                _UNAVAILABLE[key] = (time.monotonic(), type(exc), str(exc))
+                raise
+            _UNAVAILABLE.pop(key, None)
             _RESOURCES[key] = resources
         return resources
 
@@ -385,6 +411,7 @@ def reset_resources() -> None:
     """Забыть загруженные ресурсы (тесты, смена каталогов на лету)."""
     with _RESOURCES_LOCK:
         _RESOURCES.clear()
+        _UNAVAILABLE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +430,7 @@ class _CoreResult:
     number_crop: np.ndarray | None = None
     crops: dict[str, np.ndarray] = field(default_factory=dict)
     timing: dict[str, float] = field(default_factory=dict)
+    warped: np.ndarray | None = None
 
 
 def _recognize_core(
@@ -456,6 +484,7 @@ def _recognize_core(
         number_crop=crops.get(VOUCHER_NUMBER),
         crops=crops,
         timing=timing,
+        warped=res.warped,
     )
 
 
@@ -574,6 +603,7 @@ def recognize_voucher(
     auto_accept_threshold: float = DEFAULT_AUTO_ACCEPT_THRESHOLD,
     crops_dir: Path | None = None,
     save_crops: bool = True,
+    keep_aligned: bool = False,
 ) -> VoucherRecognition:
     """Распознать один ваучер: файл скана -> вариант -> кропы -> модели -> декодер.
 
@@ -586,7 +616,8 @@ def recognize_voucher(
     заранее загруженные ресурсы (по умолчанию — :func:`get_resources`, общие на процесс);
     `auto_accept_threshold` — порог `confidence` для `auto_accept` (порог для прода решает
     человек, см. `docs/ocr_tasks/DECISIONS.md`); `crops_dir`/`save_crops` — куда сохранять
-    кропы подполей для UI (T27), по умолчанию :func:`default_crops_dir`.
+    кропы подполей для UI (T27), по умолчанию :func:`default_crops_dir`; `keep_aligned` —
+    вернуть выровненную страницу в `VoucherRecognition.aligned_page` (для печатных строк).
     """
     timing: dict[str, float] = {}
     t_all = time.perf_counter()
@@ -647,9 +678,13 @@ def recognize_voucher(
         timing["save_crops"] = time.perf_counter() - t0
 
     timing["total"] = time.perf_counter() - t_all
-    confidence = final_result.confidence if final_result.records else 0.0
-    margin = final_result.margin if final_result.records else 0.0
-    auto_accept = bool(final_result.records) and confidence >= auto_accept_threshold
+    # Плашка и автоприём — по ядру, без пары (решение T21, DECISIONS Q3, T29 В7).
+    confidence = core_result.confidence if core_result.records else 0.0
+    margin = core_result.margin if core_result.records else 0.0
+    auto_accept = bool(core_result.records) and confidence >= auto_accept_threshold
+    pair_confidence = (
+        final_result.confidence if context.partner is not None and final_result.records else None
+    )
     flags = tuple(sorted({*final_result.flags, *number_result.flags}))
     return VoucherRecognition(
         status=STATUS_OK,
@@ -665,4 +700,6 @@ def recognize_voucher(
         crop_paths=crop_paths,
         timing=timing,
         flags=flags,
+        pair_confidence=pair_confidence,
+        aligned_page=core.warped if keep_aligned else None,
     )

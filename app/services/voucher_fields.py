@@ -67,6 +67,86 @@ def predictions_by_field(voucher: Voucher) -> dict[str, VoucherFieldPrediction]:
     return {prediction.field_name: prediction for prediction in voucher.predictions}
 
 
+#: Печатные поля, которые приложение может заполнить само, но только проверенным значением:
+#: из заявки, из имени файла или найденным в списках известных (`app.services.printed_match`).
+AUTOFILL_PRINTED: tuple[str, ...] = ("vessel", "agent", "work_type")
+#: Поля, которые автоматически не заполняются никогда: чтение Tesseract здесь давало мусор,
+#: а «Совместно с» ещё и определяет число буксиров в расчёте (`tug_count_from_joint`).
+NEVER_AUTOFILL: tuple[str, ...] = ("remarks", "joint_with_line_1")
+#: Источники предсказания, значение которых можно записать в пустое печатное поле.
+AUTOFILL_SOURCES: frozenset[str] = frozenset({"ocr", "application", "filename"})
+
+
+def _squash(value: object) -> str:
+    return " ".join(str(value).split()) if value else ""
+
+
+def human_value(voucher: Voucher, field_name: str) -> str | None:
+    """Значение печатного поля, которое ввёл или подтвердил человек; иначе `None`.
+
+    Поле считается введённым человеком, если по нему нет предсказания, оно уже подтверждено
+    (`confirmed_value`) или отличается от последнего предсказания. Совпадение с последним
+    предсказанием означает, что значение записало приложение (автозаполнение или «Распознать»):
+    такое значение не должно считаться «абсолютной истиной» и перекрывать заявку.
+    """
+    field = next((f for f in VOUCHER_FIELDS if f.name == field_name), None)
+    if field is None or field.attr in ("tug_id", "joint_with_line_2"):
+        return None
+    current = _squash(getattr(voucher, field.attr, None))
+    if not current:
+        return None
+    row = predictions_by_field(voucher).get(field_name)
+    if row is None or row.confirmed_value is not None:
+        return current
+    machine = row.applied_value if row.applied_value is not None else row.predicted_value
+    return None if current == _squash(machine) else current
+
+
+def remember_machine_values(voucher: Voucher) -> None:
+    """Запомнить, какие печатные поля заполнило приложение, до нового предсказания.
+
+    Вызывается перед перезаписью предсказаний: пока `predicted_value` ещё прежнее, значение
+    поля, совпадающее с ним, записало приложение (так в базе остаётся и прежний мусор чтения
+    Tesseract), и это запоминается в `applied_value`. Иначе после нового предсказания такое
+    значение выглядело бы введённым человеком.
+    """
+    predictions = predictions_by_field(voucher)
+    for field in VOUCHER_FIELDS:
+        if field.name not in AUTOFILL_PRINTED and field.name not in NEVER_AUTOFILL:
+            continue
+        row = predictions.get(field.name)
+        if row is None or row.applied_value is not None or row.confirmed_value is not None:
+            continue
+        current = _squash(getattr(voucher, field.attr, None))
+        if current and current == _squash(row.predicted_value):
+            row.applied_value = current
+
+
+def printed_hints(voucher: Voucher) -> dict[str, str]:
+    """Подсказки для пустых печатных полей: прочитанная строка, не совпавшая с известными.
+
+    Ключ — имя `<input>` формы (`vessel_name`, `agent`, `work_type`). Подсказка показывается
+    рядом с пустым полем и в поле не записывается.
+    """
+    hints: dict[str, str] = {}
+    predictions = predictions_by_field(voucher)
+    for field in VOUCHER_FIELDS:
+        if field.name not in AUTOFILL_PRINTED or _squash(getattr(voucher, field.attr, None)):
+            continue
+        prediction = predictions.get(field.name)
+        if prediction is None or not prediction.topk:
+            continue
+        try:
+            raw = json.loads(prediction.topk)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(raw, list) and raw and isinstance(raw[0], list) and raw[0]:
+            text = _squash(raw[0][0])
+            if text:
+                hints[field.attr] = text
+    return hints
+
+
 def _region_ids(db: Session, voucher: Voucher) -> dict[str, int]:
     if voucher.template_id is None:
         return {}
@@ -96,12 +176,43 @@ def confirm_fields(db: Session, voucher: Voucher, confirmed_at: datetime) -> Non
         prediction.confirmed_at = confirmed_at
 
 
+def _apply_printed(
+    voucher: Voucher, field: VoucherFieldDef, prediction: VoucherFieldPrediction | None
+) -> None:
+    """Печатное поле: только проверенное значение и только в поле, где нет ввода человека.
+
+    Значение, которое прежде записало приложение, заменяется новым; если нового проверенного
+    значения нет, прежнее машинное чистится (так уходит мусор прежнего чтения Tesseract).
+    """
+    if human_value(voucher, field.name) is not None:
+        return
+    value = None
+    if (
+        field.name not in NEVER_AUTOFILL
+        and prediction is not None
+        and prediction.predicted_value
+        and prediction.source in AUTOFILL_SOURCES
+    ):
+        value = prediction.predicted_value
+    setattr(voucher, field.attr, value or None)
+    if prediction is not None:
+        prediction.applied_value = value or None
+
+
 def apply_predictions_to_voucher(db: Session, voucher: Voucher) -> None:
-    """Заполнить поля ваучера из сохранённых предсказаний (OCR/приоров)."""
+    """Заполнить поля ваучера из сохранённых предсказаний (OCR/приоров).
+
+    Даты, номер и буксир переносятся как есть. Печатные поля (судно, агент, вид работ,
+    примечания, «совместно с») — только проверенными значениями и не поверх ввода человека
+    (`_apply_printed`).
+    """
     existing = predictions_by_field(voucher)
     tug_ids_by_name = {t.name: t.id for t in db.scalars(select(Tug)).all()}
     for field in VOUCHER_FIELDS:
         prediction = existing.get(field.name)
+        if field.name in AUTOFILL_PRINTED or field.name in NEVER_AUTOFILL:
+            _apply_printed(voucher, field, prediction)
+            continue
         if prediction is None or not prediction.predicted_value:
             continue
         value = prediction.predicted_value

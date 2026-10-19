@@ -255,6 +255,93 @@ def test_recognize_voucher_partner_unavailable_falls_back_to_core(
     assert result.records  # запись ядра осталась, пайплайн не упал
 
 
+# --- плашка и автоприём — по ядру, без пары (решение T21, T29 В7) ---------------------------
+
+
+def test_recognize_voucher_confidence_is_core_confidence_even_with_partner(
+    tmp_path: Path, resources: pl.PipelineResources
+) -> None:
+    path = _scan(tmp_path, "2026_12s.png")
+    alone = pl.recognize_voucher(
+        path, context=_context(), resources=resources, crops_dir=tmp_path / "c1",
+    )
+    paired = pl.recognize_voucher(
+        path, context=_context(partner=pl.ConfirmedPartner(forms=dict(TRUTH))),
+        resources=resources, crops_dir=tmp_path / "c2",
+    )
+    assert alone.pair_confidence is None
+    assert paired.pair_confidence is not None
+    # пара не влияет ни на уверенность, ни на автоприём
+    assert paired.confidence == pytest.approx(alone.confidence)
+    assert paired.margin == pytest.approx(alone.margin)
+    for threshold in (0.0, 0.5, 2.0):
+        a = pl.recognize_voucher(
+            path, context=_context(), resources=resources, save_crops=False,
+            auto_accept_threshold=threshold,
+        )
+        b = pl.recognize_voucher(
+            path, context=_context(partner=pl.ConfirmedPartner(forms=dict(TRUTH))),
+            resources=resources, save_crops=False, auto_accept_threshold=threshold,
+        )
+        assert a.auto_accept == b.auto_accept
+
+
+def test_recognize_voucher_keeps_aligned_page_only_on_request(
+    tmp_path: Path, resources: pl.PipelineResources
+) -> None:
+    path = _scan(tmp_path, "2026_12s.png")
+    default = pl.recognize_voucher(path, context=_context(), resources=resources, save_crops=False)
+    kept = pl.recognize_voucher(
+        path, context=_context(), resources=resources, save_crops=False, keep_aligned=True,
+    )
+    assert default.aligned_page is None
+    assert kept.aligned_page is not None
+    assert kept.aligned_page.ndim == 2 and kept.aligned_page.dtype == np.uint8
+    assert kept.aligned_page.shape == (PAGE_H, PAGE_W)
+    assert "aligned_page" not in repr(kept)  # большой массив не попадает в журналы
+
+
+# --- ресурсы: «нет моделей» запоминается на время (D4) ---------------------------------------
+
+
+def test_unavailable_resources_are_remembered_for_a_while(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pl.reset_resources()
+    builds: list[int] = []
+
+    def failing_build(*args: object, **kwargs: object) -> pl.PipelineResources:
+        builds.append(1)
+        raise FileNotFoundError("нет эталонов")
+
+    monkeypatch.setattr(pl, "_build_resources", failing_build)
+    kwargs = {"models_dir": tmp_path / "m", "layouts_dir": tmp_path / "l", "model_version": "v1"}
+
+    for _ in range(3):
+        with pytest.raises(FileNotFoundError, match="нет эталонов"):
+            pl.get_resources(**kwargs)
+    assert len(builds) == 1  # не перегружаем эталоны на каждый ваучер
+
+    pl.reset_resources()
+    with pytest.raises(FileNotFoundError):
+        pl.get_resources(**kwargs)
+    assert len(builds) == 2  # reset_resources забывает и сбой
+
+    monkeypatch.setattr(pl, "UNAVAILABLE_TTL_S", 0.0)
+    with pytest.raises(FileNotFoundError):
+        pl.get_resources(**kwargs)
+    assert len(builds) == 3  # срок хранения сбоя истёк
+    pl.reset_resources()
+
+
+def test_unavailable_result_is_no_models_status() -> None:
+    result = pl.unavailable_result("нет моделей")
+
+    assert result.status == pl.STATUS_NO_MODELS and not result.ok
+    assert result.reason == "нет моделей" and result.records == ()
+    assert result.aligned_page is None and result.pair_confidence is None
+
+
 # --- критерий приёмки: без torch/transformers -------------------------------------------------
 
 

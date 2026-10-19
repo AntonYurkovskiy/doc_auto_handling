@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageEnhance
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +34,7 @@ from app.models import Application, Direction, DocStatus, Voucher, VoucherRegion
 from app.ocr import pipeline as ocr_pipeline
 from app.ocr.decoder import FormRow
 from app.ocr.io import load_scan_pil
+from app.ocr.printed_rows import crop_printed_rows, has_printed_layout
 from app.services.calculation import normalize_work_type
 from app.services.voucher_number import parse_voucher_number, predict_next, voucher_filename_fields
 
@@ -56,10 +58,10 @@ DATETIME_FORMAT = "%Y-%m-%d %H:%M"
 HANDWRITTEN_FIELDS: frozenset[str] = frozenset(
     {"left_base", "arrived_base", "started_work", "finished_work"}
 )
-#: Печатные поля бланка — как и раньше, Tesseract по размеченному региону целиком.
-PRINTED_OCR_FIELDS: frozenset[str] = frozenset(
-    {"tugboat", "vessel", "agent", "work_type", "remarks", "joint_with_line_1", "joint_with_line_2"}
-)
+#: Печатные поля бланка, которые читает Tesseract. Примечания и «Совместно с» автоматически
+#: не читаются: на них прежнее чтение давало мусор, а «Совместно с» меняет число буксиров в
+#: расчёте (решение В3, `docs/ocr_tasks/open_questions.md`).
+PRINTED_OCR_FIELDS: frozenset[str] = frozenset({"tugboat", "vessel", "agent", "work_type"})
 
 
 @dataclass(frozen=True)
@@ -152,11 +154,17 @@ def _mean_confidence(confidences: list[int]) -> float:
     return sum(confidences) / len(confidences) / 100.0
 
 
-def ocr_image(image: Image.Image, lang: str = OCR_LANG) -> tuple[str | None, float | None]:
-    """Распознать текст на одном изображении. Возвращает (текст, confidence)."""
+def ocr_image(
+    image: Image.Image, lang: str = OCR_LANG, *, psm: int | None = None
+) -> tuple[str | None, float | None]:
+    """Распознать текст на одном изображении. Возвращает (текст, confidence).
+
+    `psm` — режим разбивки страницы Tesseract (7 — одна строка); `None` — по умолчанию.
+    """
     if pytesseract is None:
         return None, None
     _configure_tesseract()
+    options = {"config": f"--psm {psm}"} if psm else {}
 
     try:
         processed = _preprocess(image)
@@ -165,6 +173,7 @@ def ocr_image(image: Image.Image, lang: str = OCR_LANG) -> tuple[str | None, flo
             processed,
             lang=lang,
             output_type=pytesseract.Output.DICT,
+            **options,
         )
         texts: list[str] = []
         confidences: list[int] = []
@@ -184,11 +193,30 @@ def ocr_image(image: Image.Image, lang: str = OCR_LANG) -> tuple[str | None, flo
             return " ".join(texts), _mean_confidence(confidences)
 
         # Если image_to_data не вернул строк, пробуем image_to_string
-        text = pytesseract.image_to_string(processed, lang=lang).strip()
+        text = pytesseract.image_to_string(processed, lang=lang, **options).strip()
         return text or None, _MIN_CONFIDENCE if text else None
     except Exception as exc:  # pragma: no cover
         logger.warning("OCR региона завершился с ошибкой: %s", exc)
         return None, None
+
+
+#: Во сколько раз увеличиваем кроп печатной строки с выровненной страницы (200 dpi):
+#: Tesseract точнее на крупном тексте (на 30 сканах test при 2,0 верно найдено судно у 16, при
+#: 1,5 у 14).
+PRINTED_UPSCALE = 2.0
+#: Режим Tesseract для кропа одной строки значения.
+PRINTED_PSM = 7
+
+
+def read_printed_crop(
+    crop: np.ndarray, *, psm: int | None = PRINTED_PSM, upscale: float = PRINTED_UPSCALE
+) -> tuple[str | None, float | None]:
+    """Прочитать строку значения печатного поля из серого кропа (`HxW`, выровненная страница)."""
+    image = Image.fromarray(crop)
+    if upscale and upscale != 1.0:
+        size = (max(1, round(image.width * upscale)), max(1, round(image.height * upscale)))
+        image = image.resize(size, Image.Resampling.BICUBIC)
+    return ocr_image(image, psm=psm)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +373,11 @@ def build_recognition_context(
 def _recognize_pipeline(
     db: Session, voucher: Voucher, application: Application | None
 ) -> ocr_pipeline.VoucherRecognition | None:
-    """Вызов пайплайна T25 для одного ваучера; `None` — пайплайн недоступен в этой среде."""
+    """Вызов пайплайна T25 для одного ваучера.
+
+    Нет моделей или эталонов на этой машине — результат со статусом `no_models` (даты и номер
+    тогда берутся из приоров), а не `None`: статус попадает в `Voucher.ocr_status`.
+    """
     try:
         resources = ocr_pipeline.get_resources(
             models_dir=settings.ocr_models_dir,
@@ -353,8 +385,8 @@ def _recognize_pipeline(
             model_version=settings.ocr_model_version,
         )
     except Exception as exc:  # нет моделей/эталонов на машине — работаем на приорах
-        logger.warning("Пайплайн распознавания ваучеров недоступен: %s", exc)
-        return None
+        logger.warning("Пайплайн распознавания ваучеров недоступен: %s", type(exc).__name__)
+        return ocr_pipeline.unavailable_result(str(exc))
 
     context = build_recognition_context(db, voucher, application)
     _, file_tug_code = voucher_filename_fields(voucher)
@@ -367,6 +399,7 @@ def _recognize_pipeline(
         resources=resources,
         auto_accept_threshold=settings.ocr_auto_accept_threshold,
         crops_dir=settings.ocr_crops_dir,
+        keep_aligned=True,
     )
     if not recognition.ok:
         logger.info(
@@ -393,26 +426,65 @@ def _pipeline_field_values(
     return values
 
 
+def _printed_rows(voucher: Voucher) -> tuple[str, ...]:
+    """Какие печатные строки читать: судно, агент, вид работ; буксир — только если он не известен.
+
+    Буксир обычно известен по ваучеру или по коду в имени файла (`k`/`p`), поэтому лишние
+    полсекунды Tesseract на него не тратим.
+    """
+    rows = ["vessel", "agent", "work_type"]
+    _, file_tug_code = voucher_filename_fields(voucher)
+    if voucher.tug is None and file_tug_code not in ("k", "p"):
+        rows.insert(0, "tugboat")
+    return tuple(rows)
+
+
+def _read_printed(
+    voucher: Voucher,
+    recognition: ocr_pipeline.VoucherRecognition | None,
+    rows: tuple[str, ...],
+) -> dict[str, OcrFieldValue]:
+    """Прочитать печатные строки.
+
+    Основной путь — выровненная страница пайплайна и координаты строк варианта бланка
+    (`app.ocr.printed_rows`): строки лежат на своих местах, как бы ни лёг лист на сканер.
+    Без выравнивания (нет моделей, отказ выравнивания, вариант без координат) остаётся
+    прежний трафарет из долей страницы: он промахивается мимо строки у многих сканов, но
+    прочитанное всё равно проходит сверку со списками (`predict_fields`).
+    """
+    values: dict[str, OcrFieldValue] = {}
+    if recognition is not None and recognition.ok and recognition.aligned_page is not None:
+        if has_printed_layout(recognition.variant):
+            crops = crop_printed_rows(recognition.aligned_page, recognition.variant, rows)
+            for row, crop in crops.items():
+                text, confidence = read_printed_crop(crop)
+                values[row] = OcrFieldValue(text, confidence)
+            return values
+
+    if voucher.template is None:
+        return values
+    image = load_voucher_image(voucher)
+    if image is None:
+        return values
+    for region in voucher.template.regions:
+        if region.name in rows:
+            text, confidence = ocr_image(crop_region(image, region))
+            values[region.name] = OcrFieldValue(text, confidence)
+    return values
+
+
 def ocr_voucher_regions(
     db: Session, voucher: Voucher, application: Application | None = None
 ) -> VoucherOcrResult:
     """Распознать все поля ваучера.
 
-    Печатные поля (буксир, судно, агент, вид работ, примечания, «совместно с») —
-    Tesseract по размеченным регионам шаблона, как и раньше. Четыре строки дат и
-    номер ваучера — пайплайн T25 (`app.ocr.pipeline.recognize_voucher`); если он
-    недоступен в этой среде или выравнивание скана не прошло пороги, эти поля в
-    результате просто отсутствуют — `predict_fields` берёт их из приоров, как и
-    до T26.
+    Четыре строки дат и номер ваучера — пайплайн T25 (`app.ocr.pipeline.recognize_voucher`);
+    если он недоступен в этой среде или выравнивание скана не прошло пороги, эти поля в
+    результате просто отсутствуют — `predict_fields` берёт их из приоров. Печатные строки
+    (судно, агент, вид работ) читает Tesseract по выровненной странице (`_read_printed`);
+    их текст сверяется со списками в `predict_fields`, прочитанное в форму напрямую не идёт.
     """
     fields: dict[str, OcrFieldValue] = {}
-
-    image = load_voucher_image(voucher)
-    if voucher.template is not None and image is not None:
-        for region in voucher.template.regions:
-            if region.name in PRINTED_OCR_FIELDS:
-                text, confidence = ocr_image(crop_region(image, region))
-                fields[region.name] = OcrFieldValue(text, confidence)
 
     recognition: ocr_pipeline.VoucherRecognition | None = None
     if settings.ocr_enabled and voucher.file_path:
@@ -420,4 +492,5 @@ def ocr_voucher_regions(
         if recognition is not None and recognition.ok:
             fields.update(_pipeline_field_values(recognition))
 
+    fields.update(_read_printed(voucher, recognition, _printed_rows(voucher)))
     return VoucherOcrResult(fields=fields, recognition=recognition)

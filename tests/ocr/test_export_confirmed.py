@@ -139,6 +139,24 @@ def test_build_skips_partially_confirmed_voucher(tmp_path, missing):
     assert report.skipped_incomplete == [str(voucher.id)]
 
 
+@pytest.mark.parametrize("status", [DocStatus.matched, DocStatus.calculated, DocStatus.done])
+def test_build_exports_vouchers_after_matching_with_application_d2(tmp_path, status):
+    """D2: после `/match` статус `matched`, выгрузка для дообучения не должна их терять."""
+    db = _session()
+    tug = Tug(name="БК Коммунар", code="k")
+    db.add(tug)
+    db.commit()
+    voucher = _confirmed_voucher(tmp_path, tug=tug)
+    voucher.status = status
+    db.add(voucher)
+    db.commit()
+
+    df, report = build(db)
+
+    assert report.total_confirmed == 1
+    assert report.n_exported == 1
+
+
 def test_build_ignores_non_confirmed_vouchers(tmp_path):
     db = _session()
     tug = Tug(name="БК Коммунар", code="k")

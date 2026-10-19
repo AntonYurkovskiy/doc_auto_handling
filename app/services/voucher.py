@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import GROUP_A_AGENTS, GROUP_B_AGENTS
 from app.models import (
     Application,
     Voucher,
@@ -36,7 +37,9 @@ from app.models import (
     VoucherRegion,
 )
 from app.ocr.pipeline import VoucherRecognition
+from app.services import printed_match
 from app.services.calculation import match_contract_services, normalize_work_type
+from app.services.voucher_fields import human_value, remember_machine_values
 from app.services.voucher_number import voucher_filename_fields
 from app.services.voucher_ocr import OcrFieldValue, ocr_voucher_regions
 from app.services.voucher_ocr import application_reference_datetime as _application_datetime
@@ -55,13 +58,25 @@ TEXT_FIELDS: tuple[str, ...] = (
     "joint_with_line_1",
     "joint_with_line_2",
 )
-VOUCHER_FIELDS: tuple[str, ...] = PRINTED_FIELDS + ("voucher_number",) + DATETIME_FIELDS + (
-    "remarks",
-    "joint_with_line_1",
-    "joint_with_line_2",
+VOUCHER_FIELDS: tuple[str, ...] = (
+    PRINTED_FIELDS
+    + ("voucher_number",)
+    + DATETIME_FIELDS
+    + (
+        "remarks",
+        "joint_with_line_1",
+        "joint_with_line_2",
+    )
 )
 
 DEFAULT_TUG_NAMES: tuple[str, ...] = ("БК Коммунар", "БК Пионер")
+
+#: Печатные поля, значение которых берётся сверкой прочитанной строки со списками известных.
+MATCHED_PRINTED_FIELDS: tuple[str, ...] = ("vessel", "agent", "work_type")
+#: Судно ищем среди судов заявок не дальше стольких дней от даты ваучера.
+VESSEL_WINDOW_DAYS = 14
+#: Уверенность вида работ, выведенного из направления заявки (вход/выход), а не прочитанного.
+WORK_TYPE_FROM_APPLICATION_CONFIDENCE = 0.5
 
 #: Рукописные дата/время ищутся вокруг времени заявки: ±3 дня, шаг минут — 10.
 DATE_WINDOW_DAYS = 3
@@ -102,6 +117,8 @@ class VoucherHistory:
 
     tug_names: tuple[str, ...] = DEFAULT_TUG_NAMES
     vessel_names: tuple[str, ...] = ()
+    #: Суда заявок и проверенных ваучеров с датой: (время заявки/ваучера, название).
+    vessel_dates: tuple[tuple[datetime | None, str], ...] = ()
     agents: tuple[str, ...] = ()
     work_types: tuple[str, ...] = ()
     voucher_numbers: tuple[str, ...] = ()
@@ -133,16 +150,24 @@ def load_history(db: Session, limit: int = 500) -> VoucherHistory:
     applications = db.scalars(
         select(Application).order_by(Application.id.desc()).limit(limit)
     ).all()
+    # Значения печатных полей берём только у проверенных ваучеров: непроверенные могут хранить
+    # то, что когда-то записало приложение (в том числе мусор чтения), и такие значения не
+    # должны попадать в списки для сверки.
+    reviewed = [v for v in vouchers if v.reviewed_at is not None]
     return VoucherHistory(
         tug_names=DEFAULT_TUG_NAMES,
         vessel_names=_unique(
-            [v.vessel_name for v in vouchers] + [a.vessel_name for a in applications]
+            [v.vessel_name for v in reviewed] + [a.vessel_name for a in applications]
         ),
-        agents=_unique([v.agent for v in vouchers] + [a.agent for a in applications]),
-        work_types=_unique([v.work_type for v in vouchers]),
+        vessel_dates=tuple(
+            [(v.started_dt or v.left_base_dt, v.vessel_name) for v in reviewed if v.vessel_name]
+            + [(_application_datetime(a), a.vessel_name) for a in applications if a.vessel_name]
+        ),
+        agents=_unique([v.agent for v in reviewed] + [a.agent for a in applications]),
+        work_types=_unique([v.work_type for v in reviewed]),
         voucher_numbers=_unique([v.number for v in vouchers]),
-        remarks=_unique([v.remarks for v in vouchers]),
-        joint_with=_unique([v.joint_with for v in vouchers]),
+        remarks=_unique([v.remarks for v in reviewed]),
+        joint_with=_unique([v.joint_with for v in reviewed]),
     )
 
 
@@ -285,11 +310,16 @@ def _trusted_value(
             name = _tug_name_by_code(file_tug_code, history)
             if name is not None:
                 return name, PREDICTION_SOURCE_FILENAME
-    elif field_name == "vessel":
-        if voucher.vessel_name:
-            return " ".join(voucher.vessel_name.split()), PREDICTION_SOURCE_PRIOR
-        if application is not None and application.vessel_name:
+    elif field_name in ("vessel", "agent", "work_type"):
+        # Приоритет: ввод человека, затем заявка. Значение, которое в поле записало приложение,
+        # «истиной» не считается (human_value), иначе оно перекрывало бы заявку.
+        typed = human_value(voucher, field_name)
+        if typed:
+            return typed, PREDICTION_SOURCE_PRIOR
+        if field_name == "vessel" and application is not None and application.vessel_name:
             return application.vessel_name, PREDICTION_SOURCE_APPLICATION
+        if field_name == "agent" and application is not None and application.agent:
+            return application.agent, PREDICTION_SOURCE_APPLICATION
     return None
 
 
@@ -324,6 +354,49 @@ def predict_fields(
             continue
 
         ocr_value = ocr_values.get(field_name)
+        hint: tuple[tuple[str, float], ...] = ()
+        if field_name in MATCHED_PRINTED_FIELDS:
+            # Прочитанную строку в форму не пишем: берём найденное в списках известных значение.
+            matched = _match_printed(
+                field_name, ocr_value, voucher, application, history, ocr_values
+            )
+            if matched is not None:
+                value, score = matched
+                predictions.append(
+                    FieldPrediction(
+                        field_name=field_name,
+                        predicted_value=value,
+                        predicted_normalized_value=normalize_prediction(field_name, value),
+                        confidence=round(score, 6),
+                        candidates=tuple(_unique_list([value, *candidates])),
+                        source=PREDICTION_SOURCE_OCR,
+                    )
+                )
+                continue
+            if ocr_value is not None and ocr_value.text:
+                hint = ((ocr_value.text, round(ocr_value.confidence or 0.0, 6)),)
+            ocr_value = None
+            from_application = (
+                _work_type_from_application(application) if (field_name == "work_type") else None
+            )
+            if from_application:
+                # Бумагу прочитать не удалось: вид работ по направлению заявки, как и прежде.
+                predictions.append(
+                    FieldPrediction(
+                        field_name=field_name,
+                        predicted_value=from_application,
+                        predicted_normalized_value=normalize_prediction(
+                            field_name, from_application
+                        ),
+                        confidence=WORK_TYPE_FROM_APPLICATION_CONFIDENCE,
+                        candidates=tuple(_unique_list([from_application, *candidates])),
+                        source=PREDICTION_SOURCE_APPLICATION,
+                        topk=hint,
+                    )
+                )
+                continue
+        elif field_name in ("remarks", "joint_with_line_1", "joint_with_line_2"):
+            ocr_value = None  # эти строки автоматически не читаются
         if ocr_value is not None and ocr_value.text:
             predicted_text = _ocr_predicted_value(field_name, ocr_value.text)
             topk_texts = [text for text, _ in ocr_value.topk]
@@ -352,9 +425,81 @@ def predict_fields(
                 confidence=round(1.0 / len(candidates), 6) if candidates else None,
                 candidates=tuple(candidates),
                 source=PREDICTION_SOURCE_PRIOR,
+                topk=hint,
             )
         )
     return predictions
+
+
+def _reference_datetime(
+    voucher: Voucher,
+    application: Application | None,
+    ocr_values: Mapping[str, OcrFieldValue],
+) -> datetime | None:
+    """Дата ваучера для окна судов: распознанное начало работ, поля ваучера, заявка."""
+    value = ocr_values.get("started_work")
+    if value is not None and value.text:
+        parsed = _parse_datetime(value.text)
+        if parsed is not None:
+            return parsed
+    known = voucher.started_dt or voucher.left_base_dt or voucher.finished_dt
+    return known or _application_datetime(application)
+
+
+def _vessel_candidates(
+    application: Application | None, history: VoucherHistory, reference: datetime | None
+) -> tuple[list[str], bool]:
+    """Суда для сверки и признак «окно по датам».
+
+    Заявки и проверенные ваучеры не дальше `VESSEL_WINDOW_DAYS` от даты ваучера; если таких нет
+    (даты неизвестны или в окне пусто), берутся все известные суда, и сверка строже.
+    """
+    names: list[str | None] = [application.vessel_name if application else None]
+    if reference is not None:
+        span = timedelta(days=VESSEL_WINDOW_DAYS)
+        names += [
+            name
+            for when, name in history.vessel_dates
+            if when is not None and abs(when - reference) <= span
+        ]
+    windowed = len([n for n in names if n]) > 0
+    if not windowed:
+        names += list(history.vessel_names)
+    return _unique_list(names), windowed
+
+
+def _match_printed(
+    field_name: str,
+    ocr_value: OcrFieldValue | None,
+    voucher: Voucher,
+    application: Application | None,
+    history: VoucherHistory,
+    ocr_values: Mapping[str, OcrFieldValue],
+) -> tuple[str, float] | None:
+    """Прочитанная печатная строка -> известное значение и схожесть, `None` — не нашлось."""
+    if ocr_value is None or not ocr_value.text:
+        return None
+    found: printed_match.PrintedMatch | None
+    if field_name == "vessel":
+        reference = _reference_datetime(voucher, application, ocr_values)
+        names, windowed = _vessel_candidates(application, history, reference)
+        found = printed_match.match_vessel(
+            ocr_value.text,
+            names,
+            min_score=printed_match.MIN_SCORE if windowed else printed_match.STRICT_SCORE,
+        )
+    elif field_name == "agent":
+        known = _unique_list(
+            [
+                application.agent if application else None,
+                *sorted(GROUP_A_AGENTS | GROUP_B_AGENTS),
+                *history.agents,
+            ]
+        )
+        found = printed_match.match_agent(ocr_value.text, known)
+    else:
+        found = printed_match.match_work_type(ocr_value.text)
+    return (found.value, found.score) if found is not None else None
 
 
 def store_predictions(
@@ -412,15 +557,14 @@ def predict_and_store(
     """Посчитать предсказания (пайплайн T25 + Tesseract + приоры) и сохранить их."""
     application = application or voucher.application
     history = history if history is not None else load_history(db)
+    remember_machine_values(voucher)
     recognition: VoucherRecognition | None = None
     if ocr_values is None:
         ocr_result = ocr_voucher_regions(db, voucher, application)
         ocr_values = ocr_result.fields
         recognition = ocr_result.recognition
     _apply_recognition_status(voucher, recognition)
-    return store_predictions(
-        db, voucher, predict_fields(voucher, application, history, ocr_values)
-    )
+    return store_predictions(db, voucher, predict_fields(voucher, application, history, ocr_values))
 
 
 def _preferred_value(
@@ -436,17 +580,15 @@ def _preferred_value(
     return candidates[0] if candidates else None
 
 
-def _known_value(
-    field_name: str, voucher: Voucher, application: Application | None
-) -> str | None:
+def _known_value(field_name: str, voucher: Voucher, application: Application | None) -> str | None:
     if field_name == "tugboat":
         return voucher.tug.name if voucher.tug else None
     if field_name == "vessel":
-        return voucher.vessel_name or (application.vessel_name if application else None)
+        return human_value(voucher, "vessel") or (application.vessel_name if application else None)
     if field_name == "agent":
-        return voucher.agent or (application.agent if application else None)
+        return human_value(voucher, "agent") or (application.agent if application else None)
     if field_name == "work_type":
-        return voucher.work_type or _work_type_from_application(application)
+        return human_value(voucher, "work_type") or _work_type_from_application(application)
     if field_name == "voucher_number":
         return voucher.number
     if field_name in DATETIME_FIELDS:
@@ -458,9 +600,9 @@ def _known_value(
         }[field_name]
         return value.strftime(DATETIME_FORMAT) if value else None
     if field_name == "remarks":
-        return voucher.remarks
-    if field_name in ("joint_with_line_1", "joint_with_line_2"):
-        return voucher.joint_with if field_name == "joint_with_line_1" else None
+        return human_value(voucher, "remarks")
+    if field_name == "joint_with_line_1":
+        return human_value(voucher, "joint_with_line_1")
     return None
 
 

@@ -98,6 +98,17 @@ def _tug_code(voucher: Voucher) -> str | None:
     return tug.code or TUG_CODE_BY_NAME.get(tug.name)
 
 
+#: Статусы проверенного оператором ваучера: после подтверждения он идёт дальше по жизненному
+#: циклу (`matched` после `/match`, `calculated`, `done`); выбирать только `confirmed` значило
+#: терять почти все ваучеры (дефект D2, T29).
+REVIEWED_STATUSES: tuple[DocStatus, ...] = (
+    DocStatus.confirmed,
+    DocStatus.matched,
+    DocStatus.calculated,
+    DocStatus.done,
+)
+
+
 def export_confirmed_records(db: Session) -> tuple[list[dict[str, Any]], ExportReport]:
     """Подтверждённые ваучеры БД -> строки в формате манифеста (`source="app"`).
 
@@ -109,7 +120,7 @@ def export_confirmed_records(db: Session) -> tuple[list[dict[str, Any]], ExportR
     """
     report = ExportReport()
     records: list[dict[str, Any]] = []
-    vouchers = db.scalars(select(Voucher).where(Voucher.status == DocStatus.confirmed)).all()
+    vouchers = db.scalars(select(Voucher).where(Voucher.status.in_(REVIEWED_STATUSES))).all()
     report.total_confirmed = len(vouchers)
 
     for voucher in vouchers:

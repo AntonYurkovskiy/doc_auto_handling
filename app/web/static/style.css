@@ -21,6 +21,7 @@ input, select, textarea { width: 100%; padding: 6px 8px; border: 1px solid #b9c2
 .actions { margin: 12px 0; display: flex; gap: 10px; flex-wrap: wrap; }
 .status { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #e2e8f0; }
 .muted { color: #6b7684; font-size: 13px; }
+.field-hint { color: #8a5a00; background: #fff3d6; font-size: 12px; padding: 2px 8px; border-radius: 6px; margin-top: 3px; }
 .full { grid-column: 1 / -1; }
 .voucher-review { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .voucher-review h2 { font-size: 17px; margin: 0 0 10px; }

@@ -83,7 +83,7 @@ def test_add_missing_columns_adds_t26_fields_on_old_schema(tmp_path, monkeypatch
     app_database._add_missing_columns()
 
     assert {"ocr_status", "ocr_confidence"} <= _columns(engine, "vouchers")
-    assert "topk" in _columns(engine, "voucher_field_predictions")
+    assert {"topk", "applied_value"} <= _columns(engine, "voucher_field_predictions")
 
 
 def test_add_missing_columns_is_idempotent(tmp_path, monkeypatch):

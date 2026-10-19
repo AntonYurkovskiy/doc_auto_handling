@@ -89,6 +89,7 @@ def _add_missing_columns() -> None:
         ],
         "voucher_field_predictions": [
             ("topk", "TEXT"),
+            ("applied_value", "TEXT"),
         ],
     }
     with engine.begin() as conn:

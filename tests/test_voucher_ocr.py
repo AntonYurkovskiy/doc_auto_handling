@@ -13,7 +13,13 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Application, Direction, DocStatus, Tug, Voucher, VoucherFieldPrediction
 from app.ocr.decoder import RowOption, RowValue
-from app.ocr.pipeline import STATUS_ALIGN_FAILED, STATUS_OK, ConfirmedPartner, VoucherRecognition
+from app.ocr.pipeline import (
+    STATUS_ALIGN_FAILED,
+    STATUS_NO_MODELS,
+    STATUS_OK,
+    ConfirmedPartner,
+    VoucherRecognition,
+)
 from app.services.voucher import (
     PREDICTION_SOURCE_APPLICATION,
     PREDICTION_SOURCE_FILENAME,
@@ -212,9 +218,7 @@ def test_ocr_voucher_regions_merges_pipeline_fields(monkeypatch):
         captured["kwargs"] = kwargs
         return _fake_recognition()
 
-    monkeypatch.setattr(
-        "app.ocr.pipeline.get_resources", lambda **kwargs: object()
-    )
+    monkeypatch.setattr("app.ocr.pipeline.get_resources", lambda **kwargs: object())
     monkeypatch.setattr("app.ocr.pipeline.recognize_voucher", fake_recognize_voucher)
 
     result = ocr_voucher_regions(db, voucher)
@@ -261,7 +265,9 @@ def test_ocr_voucher_regions_pipeline_unavailable_without_models(monkeypatch):
     result = ocr_voucher_regions(db, voucher)
 
     assert result.fields == {}
-    assert result.recognition is None
+    # Нет моделей — статус `no_models` (раньше `None`, и `ocr_status` оставался пустым, D4).
+    assert result.recognition is not None
+    assert result.recognition.status == STATUS_NO_MODELS
 
 
 def test_ocr_voucher_regions_respects_ocr_enabled_flag(monkeypatch):
@@ -408,7 +414,37 @@ def test_build_recognition_context_no_partner_without_application():
 # --- predict_fields: OCR (Tesseract и пайплайн) важнее приоров -----------------------------
 
 
-def test_predict_fields_prefers_ocr_over_prior():
+def test_predict_fields_printed_ocr_is_matched_to_known_value():
+    """Прочитанная строка агента заменяется известным значением (шум букв не страшен)."""
+    voucher = Voucher()
+    history = VoucherHistory(agents=("Светловский судоремонтный завод",))
+    ocr_values = {"agent": OcrFieldValue("  Светловскии судоремонтныи завод |  ", 0.9)}
+
+    predictions = {p.field_name: p for p in predict_fields(voucher, None, history, ocr_values)}
+
+    assert predictions["agent"].predicted_value == "Светловский судоремонтный завод"
+    assert predictions["agent"].source == PREDICTION_SOURCE_OCR
+    assert predictions["agent"].confidence is not None and predictions["agent"].confidence >= 0.7
+    assert predictions["tugboat"].source == PREDICTION_SOURCE_PRIOR
+
+
+def test_predict_fields_printed_garbage_is_not_used_and_becomes_a_hint():
+    """Мусор Tesseract в форму не идёт: значения нет, прочитанная строка — подсказка."""
+    voucher = Voucher()
+    history = VoucherHistory(agents=("Транс-Агро",), vessel_names=("MERIDIAN",))
+    ocr_values = {
+        "agent": OcrFieldValue("me: m/v QWXZ -� 106� � �����: |", 0.83),
+        "vessel": OcrFieldValue("Tug «Kommunar» / «Буксир»", 0.9),
+    }
+
+    predictions = {p.field_name: p for p in predict_fields(voucher, None, history, ocr_values)}
+
+    for name in ("agent", "vessel"):
+        assert predictions[name].source != PREDICTION_SOURCE_OCR
+        assert predictions[name].topk and predictions[name].topk[0][0] == ocr_values[name].text
+
+
+def test_predict_fields_application_beats_ocr_for_vessel_and_agent():
     voucher = Voucher()
     application = Application(
         direction=Direction.entry,
@@ -416,19 +452,81 @@ def test_predict_fields_prefers_ocr_over_prior():
         agent="Транс-Агро",
         entry_datetime=datetime(2026, 7, 20, 9, 30),
     )
-    history = VoucherHistory()
-    ocr_values = {"agent": OcrFieldValue("  Другой Агент  ", 0.9)}
+    history = VoucherHistory(agents=("ТБК",), vessel_names=("ORIOLE",))
+    ocr_values = {"agent": OcrFieldValue("ТБК", 0.9), "vessel": OcrFieldValue("ORIOLE", 0.9)}
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, application, history, ocr_values)
+        p.field_name: p for p in predict_fields(voucher, application, history, ocr_values)
     }
 
-    assert predictions["agent"].predicted_value == "Другой Агент"
-    assert predictions["agent"].predicted_normalized_value == "другой агент"
-    assert predictions["agent"].source == PREDICTION_SOURCE_OCR
-    assert predictions["agent"].confidence == pytest.approx(0.9)
-    assert predictions["tugboat"].source == PREDICTION_SOURCE_PRIOR
+    assert predictions["agent"].predicted_value == "Транс-Агро"
+    assert predictions["agent"].source == PREDICTION_SOURCE_APPLICATION
+    assert predictions["vessel"].predicted_value == "MERIDIAN"
+    assert predictions["vessel"].source == PREDICTION_SOURCE_APPLICATION
+
+
+def test_predict_fields_work_type_read_from_paper_beats_application_direction():
+    voucher = Voucher()
+    application = Application(direction=Direction.entry)  # вход -> «швартовка» по заявке
+    ocr_values = {"work_type": OcrFieldValue("Перестановка к причалу № 8", 0.8)}
+
+    predictions = {
+        p.field_name: p for p in predict_fields(voucher, application, VoucherHistory(), ocr_values)
+    }
+
+    assert predictions["work_type"].predicted_value == "Перестановка"
+    assert predictions["work_type"].source == PREDICTION_SOURCE_OCR
+
+
+def test_predict_fields_work_type_falls_back_to_application_direction_with_hint():
+    voucher = Voucher()
+    application = Application(direction=Direction.exit)
+    ocr_values = {"work_type": OcrFieldValue("от руки, не прочитать", 0.3)}
+
+    predictions = {
+        p.field_name: p for p in predict_fields(voucher, application, VoucherHistory(), ocr_values)
+    }
+
+    work_type = predictions["work_type"]
+    assert work_type.predicted_value == "отшвартовка"
+    assert work_type.source == PREDICTION_SOURCE_APPLICATION
+    assert work_type.confidence == pytest.approx(0.5)
+    assert work_type.topk and work_type.topk[0][0] == "от руки, не прочитать"
+
+
+def test_predict_fields_vessel_is_matched_among_applications_near_the_date():
+    voucher = Voucher()
+    history = VoucherHistory(
+        vessel_names=("ORIOLE", "MERIDIAN"),
+        vessel_dates=(
+            (datetime(2026, 7, 19, 9, 0), "MERIDIAN"),
+            (datetime(2026, 3, 1, 9, 0), "ORIOLE"),  # далеко от даты ваучера
+        ),
+    )
+    ocr_values = {
+        "started_work": OcrFieldValue("2026-07-20 09:30", 0.99),
+        "vessel": OcrFieldValue("m/v ORIOLE", 0.8),
+    }
+
+    predictions = {p.field_name: p for p in predict_fields(voucher, None, history, ocr_values)}
+
+    # ORIOLE есть в истории, но не в окне ±14 дней, а окно не пусто: сверка идёт по окну
+    assert predictions["vessel"].source != PREDICTION_SOURCE_OCR
+
+
+def test_predict_fields_does_not_read_remarks_and_joint_with():
+    voucher = Voucher()
+    history = VoucherHistory(remarks=("прежнее примечание",), joint_with=("БК Пионер",))
+    ocr_values = {
+        "remarks": OcrFieldValue("| Date) � Us � U2 24920 �. time", 0.56),
+        "joint_with_line_1": OcrFieldValue("� Us ��96��.1����!� � FES. VW +.", 0.17),
+    }
+
+    predictions = {p.field_name: p for p in predict_fields(voucher, None, history, ocr_values)}
+
+    for name in ("remarks", "joint_with_line_1"):
+        assert predictions[name].source == PREDICTION_SOURCE_PRIOR
+        assert "Us" not in (predictions[name].predicted_value or "")
 
 
 def test_predict_fields_filename_beats_ocr_for_number_and_tug():
@@ -441,8 +539,7 @@ def test_predict_fields_filename_beats_ocr_for_number_and_tug():
     application = Application(vessel_name="MERIDIAN")
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, application, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, application, VoucherHistory(), ocr_values)
     }
 
     assert predictions["voucher_number"].predicted_value == "323"
@@ -459,8 +556,7 @@ def test_predict_fields_ocr_postprocesses_tugboat_name():
     ocr_values = {"tugboat": OcrFieldValue("  бк пионер  ", 0.85)}
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
     }
 
     assert predictions["tugboat"].predicted_value == "БК Пионер"
@@ -472,8 +568,7 @@ def test_predict_fields_ocr_maps_work_type_to_contract_service():
     ocr_values = {"work_type": OcrFieldValue("Отшвартовка судна CUMBRIAN", 0.9)}
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
     }
 
     assert predictions["work_type"].predicted_value == "Отшвартовка"
@@ -485,8 +580,7 @@ def test_predict_fields_ocr_maps_composite_work_type():
     ocr_values = {"work_type": OcrFieldValue("Отшвартовка + Сопровождение судна", 0.9)}
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
     }
 
     assert predictions["work_type"].predicted_value == "Отшвартовка + Сопровождение"
@@ -501,8 +595,7 @@ def test_predict_fields_ocr_parses_handwritten_datetime():
     }
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
     }
 
     assert predictions["started_work"].predicted_value == "2026-07-20 09:30"
@@ -514,8 +607,7 @@ def test_predict_fields_ocr_parses_datetime():
     ocr_values = {"started_work": OcrFieldValue("20.07.2026 09:30", 0.88)}
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
     }
 
     assert predictions["started_work"].predicted_value == "2026-07-20 09:30"
@@ -532,8 +624,7 @@ def test_predict_fields_stores_topk_candidates():
     }
 
     predictions = {
-        p.field_name: p
-        for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
+        p.field_name: p for p in predict_fields(voucher, None, VoucherHistory(), ocr_values)
     }
 
     assert predictions["started_work"].topk == (
@@ -552,7 +643,7 @@ def test_predict_and_store_runs_ocr_and_saves_predictions(monkeypatch):
 
     fake_ocr_result = VoucherOcrResult(
         fields={
-            "vessel": OcrFieldValue("ARIES", 0.9),
+            "vessel": OcrFieldValue("m/v ARIES", 0.9),
             "tugboat": OcrFieldValue("БК Пионер", 0.85),
         }
     )
@@ -560,7 +651,7 @@ def test_predict_and_store_runs_ocr_and_saves_predictions(monkeypatch):
         "app.services.voucher.ocr_voucher_regions", lambda db, v, application: fake_ocr_result
     )
 
-    stored = predict_and_store(db, voucher, None, VoucherHistory())
+    stored = predict_and_store(db, voucher, None, VoucherHistory(vessel_names=("ARIES",)))
 
     by_name = {row.field_name: row for row in stored}
     assert by_name["vessel"].predicted_value == "ARIES"
@@ -625,7 +716,7 @@ def test_apply_predictions_to_voucher_fills_fields():
     voucher.predictions = [
         VoucherFieldPrediction(field_name="voucher_number", predicted_value="123"),
         VoucherFieldPrediction(field_name="tugboat", predicted_value="БК Пионер"),
-        VoucherFieldPrediction(field_name="vessel", predicted_value="ARIES"),
+        VoucherFieldPrediction(field_name="vessel", predicted_value="ARIES", source="ocr"),
         VoucherFieldPrediction(field_name="started_work", predicted_value="2026-07-20 10:00"),
     ]
     db.commit()

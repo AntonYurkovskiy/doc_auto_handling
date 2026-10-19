@@ -383,6 +383,9 @@ class VoucherFieldPrediction(Base):
     # T26: top-k кандидатов поля — JSON `[[значение, вероятность], ...]` по убыванию
     # вероятности (даты/номер — из декодера T19/T20; печатные поля — не заполняется).
     topk: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # T30: что приложение последним записало в поле формы (автозаполнение, «Распознать»).
+    # Совпадает с текущим значением поля — значит, его записало приложение, а не человек.
+    applied_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

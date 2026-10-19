@@ -285,6 +285,7 @@ def _ingest_voucher_message(
         apply_filename_fields(db, voucher)
         predict_and_store(db, voucher)
         apply_auto_accept(db, voucher)
+        db.commit()  # иначе автозаполнение откатывается (дефект D1, T29)
         summary.created += 1
         summary.attachments_saved += 1
 

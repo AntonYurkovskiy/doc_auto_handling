@@ -34,7 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import DocStatus, Voucher, VoucherFieldPrediction
+from app.models import Voucher, VoucherFieldPrediction
 from app.ocr.decoder import ROWS
 from app.ocr.io import ScanLoadError, load_scan, normalize_width
 from app.ocr.layouts import VOUCHER_NUMBER
@@ -43,7 +43,7 @@ from app.ocr.variants import Layout as VariantLayout
 from app.ocr.variants import detect_variant
 from app.ocr.variants import load_layouts as load_variant_layouts
 from app.services.voucher_fields import voucher_auto_accept
-from ocr_lab.export_confirmed import _tug_code
+from ocr_lab.export_confirmed import REVIEWED_STATUSES, _tug_code
 from ocr_lab.paths import LAYOUTS_DIR, REPORTS_DIR, ensure_dir
 
 #: Поля карточки, по которым считаем правки — номер + 4 строки дат (как в `export_confirmed`).
@@ -188,7 +188,7 @@ def build(db: Session, month: str, *, layouts_dir: Path = LAYOUTS_DIR) -> Monito
 
     vouchers = db.scalars(
         select(Voucher).where(
-            Voucher.status == DocStatus.confirmed,
+            Voucher.status.in_(REVIEWED_STATUSES),
             Voucher.reviewed_at >= start,
             Voucher.reviewed_at < end,
         )

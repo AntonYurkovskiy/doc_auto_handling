@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -66,6 +67,31 @@ def _voucher(
         ),
     ]
     return voucher
+
+
+def test_build_counts_vouchers_after_matching_with_application_d2():
+    """D2: после `/match` статус `matched`, ваучер должен оставаться в мониторинге."""
+    db = _session()
+    tug = Tug(name="БК Коммунар", code="k")
+    db.add(tug)
+    db.commit()
+    for status in (DocStatus.confirmed, DocStatus.matched, DocStatus.calculated, DocStatus.done):
+        voucher = _voucher(
+            tug=tug, reviewed_at=datetime(2026, 9, 15, 12, 0),
+            left_base_dt=datetime(2026, 9, 15, 8, 0),
+        )
+        voucher.status = status
+        db.add(voucher)
+    unreviewed = _voucher(
+        tug=tug, reviewed_at=datetime(2026, 9, 15, 12, 0), left_base_dt=datetime(2026, 9, 15, 8, 0),
+    )
+    unreviewed.status = DocStatus.needs_review
+    db.add(unreviewed)
+    db.commit()
+
+    report = build(db, "2026-09", layouts_dir=Path("нет такого каталога"))
+
+    assert report.n_confirmed == 4
 
 
 def test_build_counts_confirmed_vouchers_within_month(tmp_path):
